@@ -12,6 +12,7 @@ use tokio::io::AsyncSeekExt;
 use std::sync::Arc;
 use reqwest_middleware::ClientWithMiddleware;
 use tokio::io::AsyncWriteExt;
+use std::time::Instant;
 
 pub const DEFAULT_CHUNK_SIZE: usize = 128 * 1024; // 128 KiB
 
@@ -100,7 +101,7 @@ impl AsyncDownloader {
         "index.html"
     }
 
-    pub async fn download(&mut self, path: impl Into<PathBuf>, progress: impl Fn(u64, u64) + Send + Sync + 'static) -> Result<(), DownloadingError> {
+    pub async fn download(&mut self, path: impl Into<PathBuf>, mut progress: impl FnMut(u64, u64, u64) + Send + Sync + 'static) -> Result<(), DownloadingError> {
         let path = path.into();
         let mut downloaded = 0;
 
@@ -175,7 +176,7 @@ impl AsyncDownloader {
                 if let Some(range) = request.headers().get("content-range") {
                     // Finish downloading if header says that we've already downloaded all the data
                     if range.to_str().unwrap().contains("*/") {
-                        progress(self.length.unwrap_or(downloaded as u64), self.length.unwrap_or(downloaded as u64));
+                        progress(self.length.unwrap_or(downloaded as u64), self.length.unwrap_or(downloaded as u64), 0);
                         return Ok(());
                     }
                 }
@@ -186,17 +187,29 @@ impl AsyncDownloader {
                 // I check this here because HEAD request can return 200 OK while GET - 416
                 // https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/416
                 if request.status() == StatusCode::RANGE_NOT_SATISFIABLE {
-                    progress(self.length.unwrap_or(downloaded as u64), self.length.unwrap_or(downloaded as u64));
+                    progress(self.length.unwrap_or(downloaded as u64), self.length.unwrap_or(downloaded as u64), 0);
                     return Ok(());
                 }
 
                 let mut stream = request.bytes_stream();
+                let mut last_speed_update = Instant::now();
+                let mut last_downloaded_bytes = downloaded;
+                let mut current_speed = 0;
 
                 while let Some(chunk) = stream.next().await {
                     let data = chunk?;
                     file.write_all(&data).await.unwrap();
                     downloaded += data.len();
-                    progress(downloaded as u64, self.length.unwrap_or(downloaded as u64));
+
+                    let now = Instant::now();
+                    let elapsed = now.duration_since(last_speed_update);
+                    if elapsed.as_millis() >= 50 {
+                        current_speed = ((downloaded - last_downloaded_bytes) as u64 * 1_000_000) / elapsed.as_micros() as u64;
+                        last_speed_update = now;
+                        last_downloaded_bytes = downloaded;
+                    }
+
+                    progress(downloaded as u64, self.length.unwrap_or(downloaded as u64), current_speed);
                 }
 
                 if let Err(err) = file.flush().await {

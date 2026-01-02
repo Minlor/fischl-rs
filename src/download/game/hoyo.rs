@@ -13,7 +13,7 @@ use crate::utils::downloader::{AsyncDownloader};
 use crate::utils::proto::{DeleteFiles, FileChunk, ManifestFile, PatchChunk, PatchFile, SophonDiff, SophonManifest};
 
 impl Sophon for Game {
-    async fn download<F>(manifest: String, chunk_base: String, game_path: String, progress: F) -> bool where F: Fn(u64, u64) + Send + Sync + 'static {
+    async fn download<F>(manifest: String, chunk_base: String, game_path: String, progress: F) -> bool where F: Fn(u64, u64, u64) + Send + Sync + 'static {
         if manifest.is_empty() || game_path.is_empty() || chunk_base.is_empty() { return false; }
 
         let p = Path::new(game_path.as_str()).to_path_buf();
@@ -27,7 +27,7 @@ impl Sophon for Game {
         let client = Arc::new(AsyncDownloader::setup_client().await);
         let mut dl = AsyncDownloader::new(client.clone(), manifest).await.unwrap();
         let file = dl.get_filename().await.to_string();
-        let dlm = dl.download(dlp.clone().join(&file), |_, _| {}).await;
+        let dlm = dl.download(dlp.clone().join(&file), |_, _, _| {}).await;
 
         if dlm.is_ok() {
             let m = fs::File::open(dlp.join(&file).as_path()).unwrap();
@@ -113,7 +113,7 @@ impl Sophon for Game {
                 }
                 for handle in handles { let _ = handle.await; }
                 // All files are complete make sure we report done just in case
-                progress(total_bytes, total_bytes);
+                progress(total_bytes, total_bytes, 0);
                 // Move from "staging" to "game_path" and delete "downloading" directory
                 let moved = move_all(Path::new(&staging), Path::new(&game_path)).await;
                 if moved.is_ok() { fs::remove_dir_all(dlp.as_path()).unwrap(); }
@@ -124,7 +124,7 @@ impl Sophon for Game {
         }
     }
 
-    async fn patch<F>(manifest: String, version: String, chunk_base: String, game_path: String, hpatchz_path: String, preloaded: bool, progress: F) -> bool where F: Fn(u64, u64) + Send + Sync + 'static {
+    async fn patch<F>(manifest: String, version: String, chunk_base: String, game_path: String, hpatchz_path: String, preloaded: bool, progress: F) -> bool where F: Fn(u64, u64, u64) + Send + Sync + 'static {
         if manifest.is_empty() || game_path.is_empty() || chunk_base.is_empty() { return false; }
 
         let mainp = Path::new(game_path.as_str()).to_path_buf();
@@ -138,7 +138,7 @@ impl Sophon for Game {
         let client = Arc::new(AsyncDownloader::setup_client().await);
         let mut dl = AsyncDownloader::new(client.clone(), manifest).await.unwrap();
         let file = dl.get_filename().await.to_string();
-        let dll = dl.download(p.clone().join(&file), |_, _| {}).await;
+        let dll = dl.download(p.clone().join(&file), |_, _, _| {}).await;
 
         if dll.is_ok() {
             let m = fs::File::open(p.join(&file).as_path()).unwrap();
@@ -174,7 +174,7 @@ impl Sophon for Game {
                     if output_path.exists() && valid {
                         progress_counter.fetch_add(file.size, Ordering::SeqCst);
                         let processed = progress_counter.load(Ordering::SeqCst);
-                        progress(processed, total_bytes);
+                        progress(processed, total_bytes, 0);
                         continue;
                     } else {
                         if let Some(parent) = output_path.parent() { fs::create_dir_all(parent).unwrap(); }
@@ -252,7 +252,7 @@ impl Sophon for Game {
                                 } else { continue; }
                             } else {
                                 let mut dl = AsyncDownloader::new(client.clone(), format!("{chunk_base}/{pn}").to_string()).await.unwrap();
-                                let dlf = dl.download(chunkp.clone(), |_, _| {}).await;
+                                let dlf = dl.download(chunkp.clone(), |_, _, _| {}).await;
 
                                 if dlf.is_ok() && chunkp.exists() {
                                     let r = validate_checksum(chunkp.as_path(), chunk.patch_md5.to_ascii_lowercase()).await;
@@ -320,12 +320,12 @@ impl Sophon for Game {
                         if r2 {
                             progress_counter.fetch_add(file.size, Ordering::SeqCst);
                             let processed = progress_counter.load(Ordering::SeqCst);
-                            progress(processed, total_bytes);
+                            progress(processed, total_bytes, 0);
                         }
                     } else { continue; }
                 }
                 // All files are complete make sure we report done just in case
-                progress(total_bytes, total_bytes);
+                progress(total_bytes, total_bytes, 0);
                 let moved = move_all(staging.as_ref(), game_path.as_ref()).await;
                 if moved.is_ok() {
                     // Delete all unneeded files after applying the patch and purging the temp directory
@@ -345,7 +345,7 @@ impl Sophon for Game {
         }
     }
 
-    async fn repair_game<F>(manifest: String, chunk_base: String, game_path: String, is_fast: bool, progress: F) -> bool where F: Fn(u64, u64) + Send + Sync + 'static {
+    async fn repair_game<F>(manifest: String, chunk_base: String, game_path: String, is_fast: bool, progress: F) -> bool where F: Fn(u64, u64, u64) + Send + Sync + 'static {
         if manifest.is_empty() || game_path.is_empty() || chunk_base.is_empty() { return false; }
 
         let mainp = Path::new(game_path.as_str());
@@ -360,7 +360,7 @@ impl Sophon for Game {
         let client = Arc::new(AsyncDownloader::setup_client().await);
         let mut dl = AsyncDownloader::new(client.clone(), manifest).await.unwrap();
         let file = dl.get_filename().await.to_string();
-        let dll = dl.download(p.clone().join(&file), |_, _| {}).await;
+        let dll = dl.download(p.clone().join(&file), |_, _, _| {}).await;
 
         if dll.is_ok() {
             let m = fs::File::open(p.join(&file).as_path()).unwrap();
@@ -443,7 +443,7 @@ impl Sophon for Game {
                 }
                 for handle in handles { let _ = handle.await; }
                 // All files are complete make sure we report done just in case
-                progress(total_bytes, total_bytes);
+                progress(total_bytes, total_bytes, 0);
                 if p.exists() { fs::remove_dir_all(p.as_path()).unwrap(); }
                 true
             } else {
@@ -452,7 +452,7 @@ impl Sophon for Game {
         } else { false }
     }
 
-    async fn preload<F>(manifest: String, version: String, chunk_base: String, game_path: String, progress: F) -> bool where F: Fn(u64, u64) + Send + Sync + 'static {
+    async fn preload<F>(manifest: String, version: String, chunk_base: String, game_path: String, progress: F) -> bool where F: Fn(u64, u64, u64) + Send + Sync + 'static {
         if manifest.is_empty() || game_path.is_empty() || chunk_base.is_empty() { return false; }
 
         let mainp = Path::new(game_path.as_str()).to_path_buf();
@@ -467,7 +467,7 @@ impl Sophon for Game {
         let client = Arc::new(AsyncDownloader::setup_client().await);
         let mut dl = AsyncDownloader::new(client.clone(), manifest).await.unwrap();
         let file = dl.get_filename().await.to_string();
-        let dll = dl.download(p.clone().join(&file), |_, _| {}).await;
+        let dll = dl.download(p.clone().join(&file), |_, _, _| {}).await;
 
         if dll.is_ok() {
             let m = fs::File::open(p.join(&file).as_path()).unwrap();
@@ -550,18 +550,18 @@ impl Sophon for Game {
                                             if chunkp.exists() {
                                                 progress_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
                                                 let processed = progress_counter.load(Ordering::SeqCst);
-                                                progress_cb(processed, total_bytes);
+                                                progress_cb(processed, total_bytes, 0);
                                                 return;
                                             }
 
                                             let mut dl = AsyncDownloader::new(client.clone(), format!("{chunk_base}/{pn}").to_string()).await.unwrap();
-                                            let dlf = dl.download(chunkp.clone(), |_, _| {}).await;
+                                            let dlf = dl.download(chunkp.clone(), |_, _, _| {}).await;
                                             let cvalid = validate_checksum(chunkp.as_path(), chunk.patch_md5.to_ascii_lowercase()).await;
 
                                             if dlf.is_ok() && cvalid {
                                                 progress_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
                                                 let processed = progress_counter.load(Ordering::SeqCst);
-                                                progress_cb(processed, total_bytes);
+                                                progress_cb(processed, total_bytes, 0);
                                             }
                                         }
                                     }
@@ -576,7 +576,7 @@ impl Sophon for Game {
                 }
                 for handle in handles { let _ = handle.await; }
                 // All files are complete make sure we report done just in case
-                progress(total_bytes, total_bytes);
+                progress(total_bytes, total_bytes, 0);
                 true
             } else {
                 false
@@ -648,7 +648,7 @@ async fn process_file_chunks(chunk_task: ManifestFile, chunks_dir: PathBuf, stag
                     let write_tx = write_tx.clone();
                     async move {
                         let mut dl = AsyncDownloader::new(client, format!("{}/{}", chunk_base, c.chunk_name)).await.unwrap();
-                        let dl_result = dl.download(chunk_path.clone(), |_, _| {}).await;
+                        let dl_result = dl.download(chunk_path.clone(), |_, _, _| {}).await;
                         if dl_result.is_ok() {
                             let valid = validate_checksum(chunk_path.as_path(), c.chunk_md5.to_ascii_lowercase()).await;
                             if valid && chunk_path.exists() {
@@ -661,7 +661,7 @@ async fn process_file_chunks(chunk_task: ManifestFile, chunks_dir: PathBuf, stag
                             }
                         } else {
                             // Retry the chunk
-                            let dl_result2 = dl.download(chunk_path.clone(), |_, _| {}).await;
+                            let dl_result2 = dl.download(chunk_path.clone(), |_, _, _| {}).await;
                             if dl_result2.is_ok() {
                                 let valid = validate_checksum(chunk_path.as_path(), c.chunk_md5.to_ascii_lowercase()).await;
                                 if valid && chunk_path.exists() {
@@ -674,7 +674,7 @@ async fn process_file_chunks(chunk_task: ManifestFile, chunks_dir: PathBuf, stag
                                 }
                             } else {
                                 // Retry again cuz CDN loves to spit random decode errors
-                                let dl_result3 = dl.download(chunk_path.clone(), |_, _| {}).await;
+                                let dl_result3 = dl.download(chunk_path.clone(), |_, _, _| {}).await;
                                 if dl_result3.is_ok() {
                                     let valid = validate_checksum(chunk_path.as_path(), c.chunk_md5.to_ascii_lowercase()).await;
                                     if valid && chunk_path.exists() {
@@ -701,7 +701,7 @@ async fn process_file_chunks(chunk_task: ManifestFile, chunks_dir: PathBuf, stag
     writer_handle.await.unwrap();
 }
 
-async fn validate_file<F>(chunk_task: ManifestFile, chunk_base: String, chunks_dir: PathBuf, staging_dir: PathBuf, fp: PathBuf, client: Arc<ClientWithMiddleware>, progress_counter: Arc<AtomicU64>, progress_cb: Arc<F>, total_bytes: u64, is_fast: bool) where F: Fn(u64, u64) + Send + Sync + 'static {
+async fn validate_file<F>(chunk_task: ManifestFile, chunk_base: String, chunks_dir: PathBuf, staging_dir: PathBuf, fp: PathBuf, client: Arc<ClientWithMiddleware>, progress_counter: Arc<AtomicU64>, progress_cb: Arc<F>, total_bytes: u64, is_fast: bool) where F: Fn(u64, u64, u64) + Send + Sync + 'static {
     let valid = validate_checksum(fp.as_path(), chunk_task.md5.to_ascii_lowercase()).await;
     if !valid {
         if fp.exists() { if let Err(e) = tokio::fs::remove_file(&fp).await { eprintln!("Failed to delete incomplete file before retry: {}: {}", fp.display(), e); } }
@@ -717,7 +717,7 @@ async fn validate_file<F>(chunk_task: ManifestFile, chunk_base: String, chunks_d
                 let revalid3 = validate_checksum(fp.as_path(), chunk_task.md5.to_ascii_lowercase()).await;
                 if !revalid3 { eprintln!("Failed to validate file after 3 retries! Please run game repair after finishing. Affected file: {}", chunk_task.name.clone()); } else {
                     let processed = progress_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
-                    progress_cb(processed, total_bytes);
+                    progress_cb(processed, total_bytes, 0);
                     for c in &chunk_task.chunks {
                         let chunk_path = chunks_dir.join(&c.chunk_name);
                         if chunk_path.exists() { if let Err(e) = tokio::fs::remove_file(&chunk_path).await { eprintln!("Failed to delete chunk file {}: {}", chunk_path.display(), e); } }
@@ -725,7 +725,7 @@ async fn validate_file<F>(chunk_task: ManifestFile, chunk_base: String, chunks_d
                 }
             } else {
                 let processed = progress_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
-                progress_cb(processed, total_bytes);
+                progress_cb(processed, total_bytes, 0);
                 for c in &chunk_task.chunks {
                     let chunk_path = chunks_dir.join(&c.chunk_name);
                     if chunk_path.exists() { if let Err(e) = tokio::fs::remove_file(&chunk_path).await { eprintln!("Failed to delete chunk file {}: {}", chunk_path.display(), e); } }
@@ -733,7 +733,7 @@ async fn validate_file<F>(chunk_task: ManifestFile, chunk_base: String, chunks_d
             }
         } else {
             let processed = progress_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
-            progress_cb(processed, total_bytes);
+            progress_cb(processed, total_bytes, 0);
             for c in &chunk_task.chunks {
                 let chunk_path = chunks_dir.join(&c.chunk_name);
                 if chunk_path.exists() { if let Err(e) = tokio::fs::remove_file(&chunk_path).await { eprintln!("Failed to delete chunk file {}: {}", chunk_path.display(), e); } }
@@ -741,7 +741,7 @@ async fn validate_file<F>(chunk_task: ManifestFile, chunk_base: String, chunks_d
         }
     } else {
         let processed = progress_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
-        progress_cb(processed, total_bytes);
+        progress_cb(processed, total_bytes, 0);
         for c in &chunk_task.chunks {
             let chunk_path = chunks_dir.join(&c.chunk_name);
             if chunk_path.exists() { if let Err(e) = tokio::fs::remove_file(&chunk_path).await { eprintln!("Failed to delete chunk file {}: {}", chunk_path.display(), e); } }

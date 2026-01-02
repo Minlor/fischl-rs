@@ -13,8 +13,8 @@ mod tests {
     #[tokio::test]
     async fn download_xxmi_test() {
         let dest = "/home/tukan/.local/share/twintaillauncher/extras/xxmi/testing";
-        let success = Extras::download_xxmi(String::from("SpectrumQT/XXMI-Libs-Package"), dest.to_string(), true, move |current, total| {
-            println!("current: {}, total: {}", current, total);
+        let success = Extras::download_xxmi(String::from("SpectrumQT/XXMI-Libs-Package"), dest.to_string(), true, move |current, total, speed| {
+            println!("current: {}, total: {}, speed: {}", current, total, speed);
         }).await;
         if success {
             let finaldest = Path::new(&dest).join("xxmi.zip");

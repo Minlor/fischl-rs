@@ -8,7 +8,7 @@ use crate::utils::github_structs::Asset;
 
 #[cfg(feature = "download")]
 impl Extras {
-    pub async fn download_fps_unlock(repository: String, dest: String, progress: impl Fn(u64, u64) + Send + Sync + 'static) -> bool {
+    pub async fn download_fps_unlock(repository: String, dest: String, progress: impl Fn(u64, u64, u64) + Send + Sync + 'static) -> bool {
         let d = Path::new(&dest);
         if d.exists() {
             let rel = tokio::task::spawn_blocking(move || { get_github_release(repository.clone()) }).await.unwrap();
@@ -29,7 +29,7 @@ impl Extras {
         }
     }
 
-    pub async fn download_jadeite(repository: String, dest: String, progress: impl Fn(u64, u64) + Send + Sync + 'static) -> bool {
+    pub async fn download_jadeite(repository: String, dest: String, progress: impl Fn(u64, u64, u64) + Send + Sync + 'static) -> bool {
         let d = Path::new(&dest);
         if d.exists() {
             let rel = tokio::task::spawn_blocking(move || { get_codeberg_release(repository.clone()) }).await.unwrap();
@@ -50,7 +50,7 @@ impl Extras {
         }
     }
 
-    pub async fn download_xxmi(repository: String, dest: String, with_loader: bool, progress: impl Fn(u64, u64) + Send + Sync + 'static) -> bool {
+    pub async fn download_xxmi(repository: String, dest: String, with_loader: bool, progress: impl Fn(u64, u64, u64) + Send + Sync + 'static) -> bool {
         let d = Path::new(&dest);
         if d.exists() {
             let rel = tokio::task::spawn_blocking(move || { get_github_release(repository.clone()) }).await.unwrap();
@@ -72,7 +72,7 @@ impl Extras {
                                 da = AsyncDownloader::new(c, u).await;
                                 if da.is_ok() {
                                     let mut du = da.unwrap();
-                                    let dl = du.download(d.join("3dmloader.exe").as_path(), |_c, _t| {}).await;
+                                    let dl = du.download(d.join("3dmloader.exe").as_path(), |_c, _t, _s| {}).await;
                                     if dl.is_ok() { true } else { false }
                                 } else { false }
                             } else { false }
@@ -113,35 +113,35 @@ impl Extras {
                     let mut dg = AsyncDownloader::new(c.clone(), dlg).await;
                     if dg.is_ok() {
                         let mut du = dg.unwrap();
-                        let dl = du.download(d.join("gimi.zip").as_path(), |_c, _t| {}).await;
+                        let dl = du.download(d.join("gimi.zip").as_path(), |_c, _t, _s| {}).await;
                         status.push(dl.is_ok());
                     }
 
                     dg = AsyncDownloader::new(c.clone(), dlsr).await;
                     if dg.is_ok() {
                         let mut du = dg.unwrap();
-                        let dl = du.download(d.join("srmi.zip").as_path(), |_c, _t| {}).await;
+                        let dl = du.download(d.join("srmi.zip").as_path(), |_c, _t, _s| {}).await;
                         status.push(dl.is_ok());
                     }
 
                     dg = AsyncDownloader::new(c.clone(), dlzz).await;
                     if dg.is_ok() {
                         let mut du = dg.unwrap();
-                        let dl = du.download(d.join("zzmi.zip").as_path(), |_c, _t| {}).await;
+                        let dl = du.download(d.join("zzmi.zip").as_path(), |_c, _t, _s| {}).await;
                         status.push(dl.is_ok());
                     }
 
                     dg = AsyncDownloader::new(c.clone(), dlww).await;
                     if dg.is_ok() {
                         let mut du = dg.unwrap();
-                        let dl = du.download(d.join("wwmi.zip").as_path(), |_c, _t| {}).await;
+                        let dl = du.download(d.join("wwmi.zip").as_path(), |_c, _t, _s| {}).await;
                         status.push(dl.is_ok());
                     }
 
                     dg = AsyncDownloader::new(c.clone(), dlhi).await;
                     if dg.is_ok() {
                         let mut du = dg.unwrap();
-                        let dl = du.download(d.join("himi.zip").as_path(), |_c, _t| {}).await;
+                        let dl = du.download(d.join("himi.zip").as_path(), |_c, _t, _s| {}).await;
                         status.push(dl.is_ok());
                     }
                     status.iter().all(|&b| b)
