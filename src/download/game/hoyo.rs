@@ -2,7 +2,7 @@ use std::fs;
 use std::io::{Cursor, SeekFrom, Write, Read, BufWriter, BufReader, copy, Seek};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use crossbeam_deque::{Injector, Steal, Worker};
 use prost::Message;
 use reqwest_middleware::ClientWithMiddleware;
@@ -13,7 +13,7 @@ use crate::utils::downloader::{AsyncDownloader};
 use crate::utils::proto::{DeleteFiles, FileChunk, ManifestFile, PatchChunk, PatchFile, SophonDiff, SophonManifest};
 
 impl Sophon for Game {
-    async fn download<F>(manifest: String, chunk_base: String, game_path: String, progress: F) -> bool where F: Fn(u64, u64, u64) + Send + Sync + 'static {
+    async fn download<F>(manifest: String, chunk_base: String, game_path: String, progress: F, cancel_token: Option<Arc<AtomicBool>>) -> bool where F: Fn(u64, u64, u64) + Send + Sync + 'static {
         if manifest.is_empty() || game_path.is_empty() || chunk_base.is_empty() { return false; }
 
         let p = Path::new(game_path.as_str()).to_path_buf();
@@ -25,7 +25,7 @@ impl Sophon for Game {
         if dlptch.exists() { fs::remove_dir_all(&dlptch).unwrap(); }
 
         let client = Arc::new(AsyncDownloader::setup_client().await);
-        let mut dl = AsyncDownloader::new(client.clone(), manifest).await.unwrap();
+        let mut dl = AsyncDownloader::new(client.clone(), manifest).await.unwrap().with_cancel_token(cancel_token.clone());
         let file = dl.get_filename().await.to_string();
         let dlm = dl.download(dlp.clone().join(&file), |_, _, _| {}).await;
 
@@ -79,10 +79,16 @@ impl Sophon for Game {
                     let staging_dir = staging.clone();
                     let chunk_base = chunk_base.clone();
                     let client = client.clone();
+                    let cancel_token = cancel_token.clone();
 
                     let mut retry_tasks = Vec::new();
                     let handle = tokio::task::spawn(async move {
                         loop {
+                            if let Some(token) = &cancel_token {
+                                if token.load(Ordering::Relaxed) {
+                                    break;
+                                }
+                            }
                             let job = local_worker.pop().or_else(|| injector.steal().success()).or_else(|| {
                                     for s in stealers.iter() { if let Steal::Success(t) = s.steal() { return Some(t); } }
                                     None
@@ -97,8 +103,15 @@ impl Sophon for Game {
                                 let staging_dir = staging_dir.clone();
                                 let chunk_base = chunk_base.clone();
                                 let client = client.clone();
+                                let cancel_token = cancel_token.clone();
                                 async move {
-                                    process_file_chunks(chunk_task.clone(), chunks_dir.clone(), staging_dir.clone(), chunk_base.clone(), client.clone(), false).await;
+                                    if let Some(token) = &cancel_token {
+                                        if token.load(Ordering::Relaxed) {
+                                            drop(permit);
+                                            return;
+                                        }
+                                    }
+                                    process_file_chunks(chunk_task.clone(), chunks_dir.clone(), staging_dir.clone(), chunk_base.clone(), client.clone(), false, cancel_token.clone()).await;
 
                                     let fp = staging_dir.join(chunk_task.clone().name);
                                     validate_file(chunk_task.clone(), chunk_base.clone(), chunks_dir.clone(), staging_dir.clone(), fp.clone(), client.clone(), progress_counter.clone(), progress_cb.clone(), total_bytes, false).await;
@@ -112,6 +125,13 @@ impl Sophon for Game {
                     handles.push(handle);
                 }
                 for handle in handles { let _ = handle.await; }
+
+                if let Some(token) = &cancel_token {
+                    if token.load(Ordering::Relaxed) {
+                        return false;
+                    }
+                }
+
                 // All files are complete make sure we report done just in case
                 progress(total_bytes, total_bytes, 0);
                 // Move from "staging" to "game_path" and delete "downloading" directory
@@ -428,7 +448,7 @@ impl Sophon for Game {
                                 let chunk_base = chunk_base.clone();
                                 let client = client.clone();
                                 async move {
-                                    process_file_chunks(chunk_task.clone(), chunks_dir.clone(), mainp.clone(), chunk_base.clone(), client.clone(), is_fast).await;
+                                    process_file_chunks(chunk_task.clone(), chunks_dir.clone(), mainp.clone(), chunk_base.clone(), client.clone(), is_fast, None).await;
 
                                     let fp = mainp.join(chunk_task.clone().name);
                                     validate_file(chunk_task.clone(), chunk_base.clone(), chunks_dir.clone(), mainp.clone(), fp.clone(), client.clone(), progress_counter.clone(), progress_cb.clone(), total_bytes, is_fast).await;
@@ -587,7 +607,7 @@ impl Sophon for Game {
     }
 }
 
-async fn process_file_chunks(chunk_task: ManifestFile, chunks_dir: PathBuf, staging_dir: PathBuf, chunk_base: String, client: Arc<ClientWithMiddleware>, is_fast: bool) {
+async fn process_file_chunks(chunk_task: ManifestFile, chunks_dir: PathBuf, staging_dir: PathBuf, chunk_base: String, client: Arc<ClientWithMiddleware>, is_fast: bool, cancel_token: Option<Arc<AtomicBool>>) {
     if chunk_task.r#type == 64 { return; }
 
     let fp = staging_dir.join(&chunk_task.name);
@@ -631,10 +651,16 @@ async fn process_file_chunks(chunk_task: ManifestFile, chunks_dir: PathBuf, stag
         let stealers = stealers.clone();
         let client = Arc::clone(&client);
         let chunk_base = chunk_base.clone();
+        let cancel_token = cancel_token.clone();
 
         let mut retry_tasks = Vec::new();
         let handle = tokio::task::spawn(async move {
             loop {
+                if let Some(token) = &cancel_token {
+                    if token.load(Ordering::Relaxed) {
+                        break;
+                    }
+                }
                 let job = local_worker.pop().or_else(|| injector.steal().success()).or_else(|| {
                     for s in stealers.iter() { if let Steal::Success(t) = s.steal() { return Some(t); } }
                     None
@@ -646,8 +672,14 @@ async fn process_file_chunks(chunk_task: ManifestFile, chunks_dir: PathBuf, stag
                     let chunk_base = chunk_base.clone();
                     let client = client.clone();
                     let write_tx = write_tx.clone();
+                    let cancel_token = cancel_token.clone();
                     async move {
-                        let mut dl = AsyncDownloader::new(client, format!("{}/{}", chunk_base, c.chunk_name)).await.unwrap();
+                        if let Some(token) = &cancel_token {
+                            if token.load(Ordering::Relaxed) {
+                                return;
+                            }
+                        }
+                        let mut dl = AsyncDownloader::new(client, format!("{}/{}", chunk_base, c.chunk_name)).await.unwrap().with_cancel_token(cancel_token.clone());
                         let dl_result = dl.download(chunk_path.clone(), |_, _, _| {}).await;
                         if dl_result.is_ok() {
                             let valid = validate_checksum(chunk_path.as_path(), c.chunk_md5.to_ascii_lowercase()).await;
@@ -705,15 +737,15 @@ async fn validate_file<F>(chunk_task: ManifestFile, chunk_base: String, chunks_d
     let valid = validate_checksum(fp.as_path(), chunk_task.md5.to_ascii_lowercase()).await;
     if !valid {
         if fp.exists() { if let Err(e) = tokio::fs::remove_file(&fp).await { eprintln!("Failed to delete incomplete file before retry: {}: {}", fp.display(), e); } }
-        process_file_chunks(chunk_task.clone(), chunks_dir.clone(), staging_dir.clone(), chunk_base.clone(), client.clone(), is_fast).await;
+        process_file_chunks(chunk_task.clone(), chunks_dir.clone(), staging_dir.clone(), chunk_base.clone(), client.clone(), is_fast, None).await;
         let revalid = validate_checksum(fp.as_path(), chunk_task.md5.to_ascii_lowercase()).await;
         if !revalid {
             if fp.exists() { if let Err(e) = tokio::fs::remove_file(&fp).await { eprintln!("Failed to delete incomplete file before re-retry: {}: {}", fp.display(), e); } }
-            process_file_chunks(chunk_task.clone(), chunks_dir.clone(), staging_dir.clone(), chunk_base.clone(), client.clone(), is_fast).await;
+            process_file_chunks(chunk_task.clone(), chunks_dir.clone(), staging_dir.clone(), chunk_base.clone(), client.clone(), is_fast, None).await;
             let revalid2 = validate_checksum(fp.as_path(), chunk_task.md5.to_ascii_lowercase()).await;
             if !revalid2 {
                 if fp.exists() { if let Err(e) = tokio::fs::remove_file(&fp).await { eprintln!("Failed to delete incomplete file before re-re-retry: {}: {}", fp.display(), e); } }
-                process_file_chunks(chunk_task.clone(), chunks_dir.clone(), staging_dir.clone(), chunk_base.clone(), client.clone(), is_fast).await;
+                process_file_chunks(chunk_task.clone(), chunks_dir.clone(), staging_dir.clone(), chunk_base.clone(), client.clone(), is_fast, None).await;
                 let revalid3 = validate_checksum(fp.as_path(), chunk_task.md5.to_ascii_lowercase()).await;
                 if !revalid3 { eprintln!("Failed to validate file after 3 retries! Please run game repair after finishing. Affected file: {}", chunk_task.name.clone()); } else {
                     let processed = progress_counter.fetch_add(chunk_task.size, Ordering::SeqCst);

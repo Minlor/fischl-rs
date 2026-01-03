@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc};
-use std::sync::atomic::{AtomicU64, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicI64, AtomicBool, Ordering};
 use std::time::Duration;
 use crossbeam_deque::{Injector, Steal, Worker};
 use hdiffpatch_rs::patchers::KrDiff;
@@ -11,7 +11,7 @@ use crate::utils::downloader::{AsyncDownloader};
 use crate::utils::{extract_archive, move_all, validate_checksum, KuroIndex, KuroResource};
 
 impl Kuro for Game {
-    async fn download<F>(manifest: String, base_url: String, game_path: String, progress: F) -> bool where F: Fn(u64, u64, u64) + Send + Sync + 'static {
+    async fn download<F>(manifest: String, base_url: String, game_path: String, progress: F, cancel_token: Option<Arc<AtomicBool>>) -> bool where F: Fn(u64, u64, u64) + Send + Sync + 'static {
         if manifest.is_empty() || game_path.is_empty() || base_url.is_empty() { return false; }
 
         let p = Path::new(game_path.as_str()).to_path_buf();
@@ -23,7 +23,7 @@ impl Kuro for Game {
         if dlptch.exists() { tokio::fs::remove_dir_all(&dlptch).await.unwrap(); }
 
         let client = Arc::new(AsyncDownloader::setup_client().await);
-        let mut dl = AsyncDownloader::new(client.clone(), manifest).await.unwrap();
+        let mut dl = AsyncDownloader::new(client.clone(), manifest).await.unwrap().with_cancel_token(cancel_token.clone());
         let dll = dl.download(dlp.clone().join("manifest.json"), |_, _, _| {}).await;
 
         if dll.is_ok() {
@@ -80,10 +80,16 @@ impl Kuro for Game {
                 let chunk_base = base_url.clone();
                 let staging = staging.clone();
                 let client = client.clone();
+                let cancel_token = cancel_token.clone();
 
                 let mut retry_tasks = Vec::new();
                 let handle = tokio::task::spawn(async move {
                     loop {
+                        if let Some(token) = &cancel_token {
+                            if token.load(Ordering::Relaxed) {
+                                break;
+                            }
+                        }
                         let job = local_worker.pop().or_else(|| injector.steal().success()).or_else(|| {
                             for s in stealers.iter() { if let Steal::Success(t) = s.steal() { return Some(t); } }
                             None
@@ -97,7 +103,14 @@ impl Kuro for Game {
                             let chunk_base = chunk_base.clone();
                             let staging = staging.clone();
                             let client = client.clone();
+                            let cancel_token = cancel_token.clone();
                             async move {
+                                if let Some(token) = &cancel_token {
+                                    if token.load(Ordering::Relaxed) {
+                                        drop(permit);
+                                        return;
+                                    }
+                                }
                                 let staging_dir = staging.join(chunk_task.dest.clone());
                                 let cvalid = validate_checksum(staging_dir.as_path(), chunk_task.md5.to_ascii_lowercase()).await;
 
@@ -107,7 +120,7 @@ impl Kuro for Game {
                                 }
 
                                 let pn = chunk_task.dest.clone();
-                                let mut dl = AsyncDownloader::new(client.clone(), format!("{chunk_base}/{pn}").to_string()).await.unwrap();
+                                let mut dl = AsyncDownloader::new(client.clone(), format!("{chunk_base}/{pn}").to_string()).await.unwrap().with_cancel_token(cancel_token.clone());
                                 
                                 let speed_tracker = global_speed.clone();
                                 let local_last_speed = Arc::new(AtomicI64::new(0));
@@ -130,7 +143,7 @@ impl Kuro for Game {
                                     progress_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
                                 } else {
                                     // Retry download
-                                    let mut dl = AsyncDownloader::new(client.clone(), format!("{chunk_base}/{pn}").to_string()).await.unwrap();
+                                    let mut dl = AsyncDownloader::new(client.clone(), format!("{chunk_base}/{pn}").to_string()).await.unwrap().with_cancel_token(cancel_token.clone());
                                     let speed_tracker = global_speed.clone();
                                     let local_last_speed = Arc::new(AtomicI64::new(0));
                                     let local_last_speed_clone = local_last_speed.clone();
@@ -184,6 +197,13 @@ impl Kuro for Game {
             }
             for handle in handles { let _ = handle.await; }
             
+            if let Some(token) = &cancel_token {
+                if token.load(Ordering::Relaxed) {
+                    monitor_handle.abort();
+                    return false;
+                }
+            }
+
             monitor_handle.abort();
             // All files are complete make sure we report done just in case
             progress(total_bytes, total_bytes, 0);

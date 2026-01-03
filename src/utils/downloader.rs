@@ -13,6 +13,7 @@ use std::sync::Arc;
 use reqwest_middleware::ClientWithMiddleware;
 use tokio::io::AsyncWriteExt;
 use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub const DEFAULT_CHUNK_SIZE: usize = 128 * 1024; // 128 KiB
 
@@ -27,7 +28,9 @@ pub enum DownloadingError {
     #[error("Failed to read metadata of the output file {0:?}: {1}")]
     OutputFileMetadataError(PathBuf, String),
     #[error("Request error: {0}")]
-    Reqwest(String)
+    Reqwest(String),
+    #[error("Download cancelled")]
+    Cancelled
 }
 
 impl From<reqwest::Error> for DownloadingError {
@@ -43,7 +46,8 @@ pub struct AsyncDownloader {
     pub chunk_size: usize,
     pub continue_downloading: bool,
     pub check_free_space: bool,
-    client: Arc<ClientWithMiddleware>
+    client: Arc<ClientWithMiddleware>,
+    cancel_token: Option<Arc<AtomicBool>>,
 }
 
 impl AsyncDownloader {
@@ -65,6 +69,7 @@ impl AsyncDownloader {
             chunk_size: DEFAULT_CHUNK_SIZE,
             continue_downloading: true,
             check_free_space: true,
+            cancel_token: None,
             client: client
         })
     }
@@ -88,6 +93,10 @@ impl AsyncDownloader {
     }
 
     #[inline]
+    pub fn with_cancel_token(mut self, cancel_token: Option<Arc<AtomicBool>>) -> Self {
+        self.cancel_token = cancel_token;
+        self
+    }
     pub fn length(&self) -> Option<u64> {
         self.length
     }
@@ -197,6 +206,11 @@ impl AsyncDownloader {
                 let mut current_speed = 0;
 
                 while let Some(chunk) = stream.next().await {
+                    if let Some(token) = &self.cancel_token {
+                        if token.load(Ordering::Relaxed) {
+                            return Err(DownloadingError::Cancelled);
+                        }
+                    }
                     let data = chunk?;
                     file.write_all(&data).await.unwrap();
                     downloaded += data.len();

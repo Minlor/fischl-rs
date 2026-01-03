@@ -1,26 +1,33 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::AtomicBool;
 use crate::download::game::{Game, Zipped};
 use crate::utils::downloader::{AsyncDownloader};
 
 impl Zipped for Game {
-    async fn download(urls: Vec<String>, game_path: String, progress: impl Fn(u64, u64, u64) + Send + Sync + 'static) -> bool {
+    async fn download(urls: Vec<String>, game_path: String, progress: impl Fn(u64, u64, u64) + Send + Sync + 'static, cancel_token: Option<Arc<AtomicBool>>) -> bool {
         if urls.is_empty() || game_path.is_empty() { return false; }
 
         let mut ret = true;
         let progress = Arc::new(Mutex::new(progress));
         for url in urls {
+            if let Some(token) = &cancel_token {
+                if token.load(std::sync::atomic::Ordering::Relaxed) {
+                    return false;
+                }
+            }
+
             let p = progress.clone();
             let c = AsyncDownloader::setup_client().await;
             let dla = AsyncDownloader::new(Arc::new(c), url).await;
             if dla.is_ok() {
-                let mut dlu = dla.unwrap();
+                let mut dlu = dla.unwrap().with_cancel_token(cancel_token.clone());
                 let file = dlu.get_filename().await.to_string();
                 let dl = dlu.download(Path::new(game_path.as_str()).to_path_buf().join(&file), move |current, total, speed| {
                     let pl = p.lock().unwrap();
                     pl(current, total, speed);
                 }).await;
-                if dl.is_ok() { ret = true; } else { ret = false; }
+                if dl.is_ok() { ret = true; } else { ret = false; break; }
             } else { ret = false; }
         }
         ret
