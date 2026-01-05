@@ -14,6 +14,71 @@ use reqwest_middleware::ClientWithMiddleware;
 use tokio::io::AsyncWriteExt;
 use std::time::Instant;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use tokio::sync::Mutex;
+use std::time::Duration;
+
+#[derive(Debug)]
+struct DownloadRateLimiterState {
+    tat: tokio::time::Instant,
+}
+
+#[derive(Debug)]
+pub struct DownloadRateLimiter {
+    limit_bps: AtomicU64,
+    state: Mutex<DownloadRateLimiterState>,
+}
+
+impl DownloadRateLimiter {
+    fn new() -> Self {
+        Self {
+            limit_bps: AtomicU64::new(0),
+            state: Mutex::new(DownloadRateLimiterState {
+                tat: tokio::time::Instant::now(),
+            }),
+        }
+    }
+
+    fn set_limit_bps(&self, limit_bps: u64) {
+        self.limit_bps.store(limit_bps, AtomicOrdering::Relaxed);
+    }
+
+    async fn consume(&self, bytes: u64) {
+        let limit_bps = self.limit_bps.load(AtomicOrdering::Relaxed);
+        if limit_bps == 0 || bytes == 0 {
+            return;
+        }
+
+        let delay = Duration::from_secs_f64(bytes as f64 / limit_bps as f64);
+        let now = tokio::time::Instant::now();
+
+        let sleep_until = {
+            let mut state = self.state.lock().await;
+            let tat = if state.tat > now { state.tat } else { now };
+            state.tat = tat + delay;
+            tat
+        };
+
+        if sleep_until > now {
+            tokio::time::sleep_until(sleep_until).await;
+        }
+    }
+}
+
+static GLOBAL_DOWNLOAD_RATE_LIMITER: OnceLock<DownloadRateLimiter> = OnceLock::new();
+
+fn global_download_rate_limiter() -> &'static DownloadRateLimiter {
+    GLOBAL_DOWNLOAD_RATE_LIMITER.get_or_init(DownloadRateLimiter::new)
+}
+
+/// Sets the global download speed limit in KiB/s. Set to 0 for unlimited.
+///
+/// This limiter is shared across all concurrent downloads running inside this process.
+pub fn set_global_download_speed_limit_kib(kib_per_sec: u64) {
+    let bps = kib_per_sec.saturating_mul(1024);
+    global_download_rate_limiter().set_limit_bps(bps);
+}
 
 pub const DEFAULT_CHUNK_SIZE: usize = 128 * 1024; // 128 KiB
 
@@ -212,6 +277,7 @@ impl AsyncDownloader {
                         }
                     }
                     let data = chunk?;
+                    global_download_rate_limiter().consume(data.len() as u64).await;
                     file.write_all(&data).await.unwrap();
                     downloaded += data.len();
 
