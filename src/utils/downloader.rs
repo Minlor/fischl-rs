@@ -21,7 +21,8 @@ use std::time::Duration;
 
 #[derive(Debug)]
 struct DownloadRateLimiterState {
-    tat: tokio::time::Instant,
+    window_start: tokio::time::Instant,
+    used_in_window: u64,
 }
 
 #[derive(Debug)]
@@ -35,7 +36,8 @@ impl DownloadRateLimiter {
         Self {
             limit_bps: AtomicU64::new(0),
             state: Mutex::new(DownloadRateLimiterState {
-                tat: tokio::time::Instant::now(),
+                window_start: tokio::time::Instant::now(),
+                used_in_window: 0,
             }),
         }
     }
@@ -44,24 +46,47 @@ impl DownloadRateLimiter {
         self.limit_bps.store(limit_bps, AtomicOrdering::Relaxed);
     }
 
-    async fn consume(&self, bytes: u64) {
+    async fn consume(&self, mut bytes: u64) {
         let limit_bps = self.limit_bps.load(AtomicOrdering::Relaxed);
         if limit_bps == 0 || bytes == 0 {
             return;
         }
 
-        let delay = Duration::from_secs_f64(bytes as f64 / limit_bps as f64);
-        let now = tokio::time::Instant::now();
+        // Fixed-window limiter to keep the "instantaneous" rate close to the configured cap.
+        // This avoids long sleep / burst patterns that can show up as spikes in Task Manager.
+        const WINDOW_MS: u64 = 100;
+        let window = Duration::from_millis(WINDOW_MS);
 
-        let sleep_until = {
-            let mut state = self.state.lock().await;
-            let tat = if state.tat > now { state.tat } else { now };
-            state.tat = tat + delay;
-            tat
-        };
+        // Integer budget for this window; at least 1 byte to avoid deadlock at tiny limits.
+        let window_budget = ((limit_bps as u128 * WINDOW_MS as u128) / 1000u128).max(1) as u64;
 
-        if sleep_until > now {
-            tokio::time::sleep_until(sleep_until).await;
+        while bytes > 0 {
+            let now = tokio::time::Instant::now();
+            let mut sleep_until: Option<tokio::time::Instant> = None;
+            let mut allowed_now = 0u64;
+
+            {
+                let mut state = self.state.lock().await;
+                if now.duration_since(state.window_start) >= window {
+                    state.window_start = now;
+                    state.used_in_window = 0;
+                }
+
+                let remaining = window_budget.saturating_sub(state.used_in_window);
+                if remaining == 0 {
+                    sleep_until = Some(state.window_start + window);
+                } else {
+                    allowed_now = remaining.min(bytes);
+                    state.used_in_window = state.used_in_window.saturating_add(allowed_now);
+                }
+            }
+
+            if let Some(until) = sleep_until {
+                tokio::time::sleep_until(until).await;
+                continue;
+            }
+
+            bytes = bytes.saturating_sub(allowed_now);
         }
     }
 }
@@ -81,6 +106,7 @@ pub fn set_global_download_speed_limit_kib(kib_per_sec: u64) {
 }
 
 pub const DEFAULT_CHUNK_SIZE: usize = 128 * 1024; // 128 KiB
+const RATE_LIMIT_SLICE_SIZE: usize = 8 * 1024; // 8 KiB
 
 #[derive(Error, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DownloadingError {
@@ -277,19 +303,28 @@ impl AsyncDownloader {
                         }
                     }
                     let data = chunk?;
-                    global_download_rate_limiter().consume(data.len() as u64).await;
-                    file.write_all(&data).await.unwrap();
-                    downloaded += data.len();
 
-                    let now = Instant::now();
-                    let elapsed = now.duration_since(last_speed_update);
-                    if elapsed.as_millis() >= 50 {
-                        current_speed = ((downloaded - last_downloaded_bytes) as u64 * 1_000_000) / elapsed.as_micros() as u64;
-                        last_speed_update = now;
-                        last_downloaded_bytes = downloaded;
+                    for part in data.chunks(RATE_LIMIT_SLICE_SIZE) {
+                        if let Some(token) = &self.cancel_token {
+                            if token.load(Ordering::Relaxed) {
+                                return Err(DownloadingError::Cancelled);
+                            }
+                        }
+
+                        global_download_rate_limiter().consume(part.len() as u64).await;
+                        file.write_all(part).await.unwrap();
+                        downloaded += part.len();
+
+                        let now = Instant::now();
+                        let elapsed = now.duration_since(last_speed_update);
+                        if elapsed.as_millis() >= 50 {
+                            current_speed = ((downloaded - last_downloaded_bytes) as u64 * 1_000_000) / elapsed.as_micros() as u64;
+                            last_speed_update = now;
+                            last_downloaded_bytes = downloaded;
+                        }
+
+                        progress(downloaded as u64, self.length.unwrap_or(downloaded as u64), current_speed);
                     }
-
-                    progress(downloaded as u64, self.length.unwrap_or(downloaded as u64), current_speed);
                 }
 
                 if let Err(err) = file.flush().await {
