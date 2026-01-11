@@ -1,36 +1,54 @@
-use std::{fs, io};
+use crate::utils::codeberg_structs::CodebergRelease;
+use crate::utils::github_structs::GithubRelease;
+use reqwest::header::USER_AGENT;
+use serde::{Deserialize, Serialize};
 use std::io::{Error, Read, Write};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Command;
-use reqwest::header::USER_AGENT;
-use serde::{Deserialize, Serialize};
-use crate::utils::codeberg_structs::CodebergRelease;
-use crate::utils::github_structs::GithubRelease;
+use std::{fs, io};
 
-pub(crate) mod github_structs;
 pub(crate) mod codeberg_structs;
-pub(crate) mod proto;
-pub mod free_space;
 pub mod downloader;
+pub mod free_space;
+pub(crate) mod github_structs;
+pub(crate) mod proto;
+pub use downloader::SpeedTracker;
 
 pub fn get_github_release(repository: String) -> Option<GithubRelease> {
     if repository.is_empty() {
         None
     } else {
-        let url = format!("https://api.github.com/repos/{}/releases/latest", repository);
+        let url = format!(
+            "https://api.github.com/repos/{}/releases/latest",
+            repository
+        );
         let client = reqwest::blocking::Client::new();
-        let response = client.get(url).header(USER_AGENT, "lib/fischl-rs").header("X-GitHub-Api-Version", "2022-11-28").header("Accept", "application/vnd.github+json").send();
+        let response = client
+            .get(url)
+            .header(USER_AGENT, "lib/fischl-rs")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("Accept", "application/vnd.github+json")
+            .send();
         match response {
             Ok(resp) => {
                 // Check for HTTP errors explicitly
-                if let Err(err) = resp.error_for_status_ref() { eprintln!("GitHub API returned error status: {:?}", err.status());return None; }
+                if let Err(err) = resp.error_for_status_ref() {
+                    eprintln!("GitHub API returned error status: {:?}", err.status());
+                    return None;
+                }
                 match resp.json::<GithubRelease>() {
                     Ok(github_release) => Some(github_release),
-                    Err(json_err) => { eprintln!("Failed to parse JSON: {}", json_err);None }
+                    Err(json_err) => {
+                        eprintln!("Failed to parse JSON: {}", json_err);
+                        None
+                    }
                 }
             }
-            Err(err) => { eprintln!("Network or request failed: {}", err);None }
+            Err(err) => {
+                eprintln!("Network or request failed: {}", err);
+                None
+            }
         }
     }
 }
@@ -39,7 +57,10 @@ pub(crate) fn get_codeberg_release(repository: String) -> Option<CodebergRelease
     if repository.is_empty() {
         None
     } else {
-        let url = format!("https://codeberg.org/api/v1/repos/{}/releases?draft=false&pre-release=false", repository);
+        let url = format!(
+            "https://codeberg.org/api/v1/repos/{}/releases?draft=false&pre-release=false",
+            repository
+        );
         let client = reqwest::blocking::Client::new();
         let response = client.get(url).header(USER_AGENT, "lib/fischl-rs").send();
         if response.is_ok() {
@@ -56,14 +77,28 @@ pub fn extract_archive(archive_path: String, extract_dest: String, move_subdirs:
     let src = Path::new(&archive_path);
     let dest = Path::new(&extract_dest);
 
-    if !src.exists() { false } else if !dest.exists() {
+    if !src.exists() {
+        false
+    } else if !dest.exists() {
         fs::create_dir_all(dest).unwrap();
-        actually_uncompress(src.to_str().unwrap().to_string(), dest.to_str().unwrap().to_string(), move_subdirs);
-        if src.exists() { fs::remove_file(src).unwrap(); }
+        actually_uncompress(
+            src.to_str().unwrap().to_string(),
+            dest.to_str().unwrap().to_string(),
+            move_subdirs,
+        );
+        if src.exists() {
+            fs::remove_file(src).unwrap();
+        }
         true
     } else {
-        actually_uncompress(src.to_str().unwrap().to_string(), dest.to_str().unwrap().to_string(), move_subdirs);
-        if src.exists() { fs::remove_file(src).unwrap(); }
+        actually_uncompress(
+            src.to_str().unwrap().to_string(),
+            dest.to_str().unwrap().to_string(),
+            move_subdirs,
+        );
+        if src.exists() {
+            fs::remove_file(src).unwrap();
+        }
         true
     }
 }
@@ -85,13 +120,20 @@ pub fn assemble_multipart_archive(parts: Vec<String>, dest: String) -> bool {
         out.write_all(&buf).unwrap();
         fs::remove_file(&partp).unwrap();
     }
-    if out.flush().is_err() { return false; }
+    if out.flush().is_err() {
+        return false;
+    }
     true
 }
 
-pub(crate) fn move_all<'a>(src: &'a Path, dst: &'a Path) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>> {
+pub(crate) fn move_all<'a>(
+    src: &'a Path,
+    dst: &'a Path,
+) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>> {
     Box::pin(async move {
-        if !dst.exists() { tokio::fs::create_dir_all(dst).await?; }
+        if !dst.exists() {
+            tokio::fs::create_dir_all(dst).await?;
+        }
 
         let mut dir = tokio::fs::read_dir(src).await?;
         while let Some(entry) = dir.next_entry().await? {
@@ -112,12 +154,10 @@ pub(crate) fn move_all<'a>(src: &'a Path, dst: &'a Path) -> Pin<Box<dyn Future<O
 
 pub(crate) async fn validate_checksum(file: &Path, checksum: String) -> bool {
     match tokio::fs::File::open(file).await {
-        Ok(f) => {
-            match chksum_md5::async_chksum(f).await {
-                Ok(digest) => digest.to_hex_lowercase() == checksum.to_ascii_lowercase(),
-                Err(_) => false,
-            }
-        }
+        Ok(f) => match chksum_md5::async_chksum(f).await {
+            Ok(digest) => digest.to_hex_lowercase() == checksum.to_ascii_lowercase(),
+            Err(_) => false,
+        },
         Err(_) => false,
     }
 }
@@ -135,7 +175,15 @@ pub fn prettify_bytes(bytes: u64) -> String {
     }
 }
 
-pub fn wait_for_process<F>(process_name: &str, delay_ms: u64, retries: usize, mut callback: F) -> bool where F: FnMut(bool) -> bool {
+pub fn wait_for_process<F>(
+    process_name: &str,
+    delay_ms: u64,
+    retries: usize,
+    mut callback: F,
+) -> bool
+where
+    F: FnMut(bool) -> bool,
+{
     let mut sys = sysinfo::System::new_all();
     for _ in 0..retries {
         sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
@@ -147,16 +195,30 @@ pub fn wait_for_process<F>(process_name: &str, delay_ms: u64, retries: usize, mu
             let apnn = apns.first().unwrap();
             apnn.contains(pn)
         });
-        if callback(found) { return found; }
+        if callback(found) {
+            return found;
+        }
         std::thread::sleep(std::time::Duration::from_millis(delay_ms));
     }
     false
 }
 
-pub fn hpatchz<T: Into<PathBuf> + std::fmt::Debug>(bin_path: String, file: T, patch: T, output: T) -> io::Result<()> {
-    let output = Command::new(bin_path.as_str()).arg("-f").arg(file.into().as_os_str()).arg(patch.into().as_os_str()).arg(output.into().as_os_str()).output()?;
+pub fn hpatchz<T: Into<PathBuf> + std::fmt::Debug>(
+    bin_path: String,
+    file: T,
+    patch: T,
+    output: T,
+) -> io::Result<()> {
+    let output = Command::new(bin_path.as_str())
+        .arg("-f")
+        .arg(file.into().as_os_str())
+        .arg(patch.into().as_os_str())
+        .arg(output.into().as_os_str())
+        .output()?;
 
-    if String::from_utf8_lossy(output.stdout.as_slice()).contains("patch ok!") { Ok(()) } else {
+    if String::from_utf8_lossy(output.stdout.as_slice()).contains("patch ok!") {
+        Ok(())
+    } else {
         let err = String::from_utf8_lossy(&output.stderr);
         Err(Error::other(format!("Failed to apply hdiff patch: {err}")))
     }
@@ -171,7 +233,7 @@ pub(crate) fn actually_uncompress(archive_path: String, dest: String, strip_head
                 let mut a = archive.unwrap();
                 a.extract(dest).unwrap();
             }
-        },
+        }
         "tar.gz" => {
             let archive = fs::File::open(archive_path).unwrap();
             let decompressor = flate2::read::GzDecoder::new(archive);
@@ -183,25 +245,41 @@ pub(crate) fn actually_uncompress(archive_path: String, dest: String, strip_head
                 let dest_path = Path::new(&dest);
                 let mut entries = archive.entries().unwrap();
 
-                let first_entry = match entries.next() { Some(e) => e.unwrap(), None => return };
+                let first_entry = match entries.next() {
+                    Some(e) => e.unwrap(),
+                    None => return,
+                };
                 let first_path = first_entry.path().unwrap().to_path_buf();
-                let first_path = first_path.strip_prefix(".").unwrap_or(&first_path).to_path_buf();
-                let top = match first_path.components().next() { Some(c) => PathBuf::from(c.as_os_str()), None => PathBuf::new() };
+                let first_path = first_path
+                    .strip_prefix(".")
+                    .unwrap_or(&first_path)
+                    .to_path_buf();
+                let top = match first_path.components().next() {
+                    Some(c) => PathBuf::from(c.as_os_str()),
+                    None => PathBuf::new(),
+                };
 
                 let all_entries = std::iter::once(Ok(first_entry)).chain(entries);
                 for entry_res in all_entries {
                     let mut entry = entry_res.unwrap();
                     let orig = entry.path().unwrap().to_path_buf();
                     let orig = orig.strip_prefix(".").unwrap_or(&orig).to_path_buf();
-                    let rel = match orig.strip_prefix(&top) { Ok(p) => p, Err(_) => orig.as_ref() };
+                    let rel = match orig.strip_prefix(&top) {
+                        Ok(p) => p,
+                        Err(_) => orig.as_ref(),
+                    };
 
-                    if rel.as_os_str().is_empty() { continue; }
+                    if rel.as_os_str().is_empty() {
+                        continue;
+                    }
                     let out = dest_path.to_path_buf().join(rel);
-                    if let Some(parent) = out.parent() { fs::create_dir_all(parent).unwrap(); }
+                    if let Some(parent) = out.parent() {
+                        fs::create_dir_all(parent).unwrap();
+                    }
                     entry.unpack(&out).unwrap();
                 }
             }
-        },
+        }
         "tar.xz" => {
             let file = fs::File::open(&archive_path).unwrap();
             let decompressor = liblzma::read::XzDecoder::new(file);
@@ -213,37 +291,62 @@ pub(crate) fn actually_uncompress(archive_path: String, dest: String, strip_head
                 let dest_path = Path::new(&dest);
                 let mut entries = archive.entries().unwrap();
 
-                let first_entry = match entries.next() { Some(e) => e.unwrap(), None => return};
+                let first_entry = match entries.next() {
+                    Some(e) => e.unwrap(),
+                    None => return,
+                };
                 let first_path = first_entry.path().unwrap().to_path_buf();
-                let first_path = first_path.strip_prefix(".").unwrap_or(&first_path).to_path_buf();
-                let top = match first_path.components().next() { Some(c) => PathBuf::from(c.as_os_str()), None => PathBuf::new() };
+                let first_path = first_path
+                    .strip_prefix(".")
+                    .unwrap_or(&first_path)
+                    .to_path_buf();
+                let top = match first_path.components().next() {
+                    Some(c) => PathBuf::from(c.as_os_str()),
+                    None => PathBuf::new(),
+                };
 
                 let all_entries = std::iter::once(Ok(first_entry)).chain(entries);
                 for entry_res in all_entries {
                     let mut entry = entry_res.unwrap();
                     let orig = entry.path().unwrap().to_path_buf();
                     let orig = orig.strip_prefix(".").unwrap_or(&orig).to_path_buf();
-                    let rel = match orig.strip_prefix(&top) { Ok(p) => p, Err(_) => orig.as_ref() };
+                    let rel = match orig.strip_prefix(&top) {
+                        Ok(p) => p,
+                        Err(_) => orig.as_ref(),
+                    };
 
-                    if rel.as_os_str().is_empty() { continue; }
+                    if rel.as_os_str().is_empty() {
+                        continue;
+                    }
                     let out = dest_path.to_path_buf().join(rel);
-                    if let Some(parent) = out.parent() { fs::create_dir_all(parent).unwrap(); }
+                    if let Some(parent) = out.parent() {
+                        fs::create_dir_all(parent).unwrap();
+                    }
                     entry.unpack(&out).unwrap();
                 }
             }
         }
-        "7z" => { sevenz_rust2::decompress_file(archive_path.as_str(), dest.as_str()).unwrap_or(()); }
+        "7z" => {
+            sevenz_rust2::decompress_file(archive_path.as_str(), dest.as_str()).unwrap_or(());
+        }
         &_ => {}
     }
 }
 
 pub(crate) fn get_full_extension(path: &str) -> Option<&str> {
     const MULTI_PART_EXTS: [&str; 2] = ["tar.gz", "tar.xz"];
-    let file = path.rsplit(|c| c == '/' || c == '\\').next().unwrap_or(path);
+    let file = path
+        .rsplit(|c| c == '/' || c == '\\')
+        .next()
+        .unwrap_or(path);
     for ext in MULTI_PART_EXTS {
-        if file.ends_with(ext) { return Some(ext); }
+        if file.ends_with(ext) {
+            return Some(ext);
+        }
     }
-    file.rsplit('.').nth(1).map(|_| file.rsplitn(2, '.').collect::<Vec<_>>()[0])
+    file.rsplit('.')
+        .nth(1)
+        .map(|_| file.rsplitn(2, '.').collect::<Vec<_>>()[0])
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
