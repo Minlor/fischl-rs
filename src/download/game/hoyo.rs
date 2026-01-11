@@ -24,7 +24,7 @@ impl Sophon for Game {
         cancel_token: Option<Arc<AtomicBool>>,
     ) -> bool
     where
-        F: Fn(u64, u64, u64) + Send + Sync + 'static,
+        F: Fn(u64, u64, u64, u64) + Send + Sync + 'static,
     {
         if manifest.is_empty() || game_path.is_empty() || chunk_base.is_empty() {
             return false;
@@ -48,7 +48,7 @@ impl Sophon for Game {
             .unwrap()
             .with_cancel_token(cancel_token.clone());
         let file = dl.get_filename().await.to_string();
-        let dlm = dl.download(dlp.clone().join(&file), |_, _, _| {}).await;
+        let dlm = dl.download(dlp.clone().join(&file), |_, _, _, _| {}).await;
 
         if dlm.is_ok() {
             let m = fs::File::open(dlp.join(&file).as_path()).unwrap();
@@ -92,20 +92,23 @@ impl Sophon for Game {
                     .map(|f| f.size)
                     .sum();
                 let progress_counter = Arc::new(AtomicU64::new(0));
-                let speed_tracker = Arc::new(SpeedTracker::new());
+                let net_tracker = Arc::new(SpeedTracker::new());
+                let disk_tracker = Arc::new(SpeedTracker::new());
                 let progress = Arc::new(progress);
 
                 // Monitor task for real-time progress/speed reporting using EMA smoothing
                 let monitor_handle = tokio::spawn({
                     let progress_counter = progress_counter.clone();
-                    let speed_tracker = speed_tracker.clone();
+                    let net_tracker = net_tracker.clone();
+                    let disk_tracker = disk_tracker.clone();
                     let progress = progress.clone();
                     async move {
                         loop {
-                            tokio::time::sleep(Duration::from_millis(200)).await;
+                            tokio::time::sleep(Duration::from_millis(500)).await;
                             let current = progress_counter.load(Ordering::SeqCst);
-                            let speed = speed_tracker.update();
-                            progress(current, total_bytes, speed);
+                            let net_speed = net_tracker.update();
+                            let disk_speed = disk_tracker.update();
+                            progress(current, total_bytes, net_speed, disk_speed);
                         }
                     }
                 });
@@ -135,7 +138,8 @@ impl Sophon for Game {
 
                     let stealers = stealers.clone();
                     let progress_counter = progress_counter.clone();
-                    let speed_tracker = speed_tracker.clone();
+                    let net_tracker = net_tracker.clone();
+                    let disk_tracker = disk_tracker.clone();
                     let progress_cb = progress.clone();
                     let chunks_dir = chunks.clone();
                     let staging_dir = staging.clone();
@@ -169,7 +173,8 @@ impl Sophon for Game {
 
                             let ct = tokio::spawn({
                                 let progress_counter = progress_counter.clone();
-                                let speed_tracker = speed_tracker.clone();
+                                let net_tracker = net_tracker.clone();
+                                let disk_tracker = disk_tracker.clone();
                                 let progress_cb = progress_cb.clone();
                                 let chunks_dir = chunks_dir.clone();
                                 let staging_dir = staging_dir.clone();
@@ -191,7 +196,8 @@ impl Sophon for Game {
                                         client.clone(),
                                         false,
                                         cancel_token.clone(),
-                                        speed_tracker.clone(),
+                                        net_tracker.clone(),
+                                        disk_tracker.clone(),
                                     )
                                     .await;
 
@@ -207,6 +213,8 @@ impl Sophon for Game {
                                         progress_cb.clone(),
                                         total_bytes,
                                         false,
+                                        net_tracker.clone(),
+                                        disk_tracker.clone(),
                                     )
                                     .await;
                                     drop(permit);
@@ -233,7 +241,7 @@ impl Sophon for Game {
 
                 monitor_handle.abort();
                 // All files are complete make sure we report done just in case
-                progress(total_bytes, total_bytes, 0);
+                progress(total_bytes, total_bytes, 0, 0);
                 // Move from "staging" to "game_path" and delete "downloading" directory
                 let moved = move_all(Path::new(&staging), Path::new(&game_path)).await;
                 if moved.is_ok() {
@@ -258,7 +266,7 @@ impl Sophon for Game {
         progress: F,
     ) -> bool
     where
-        F: Fn(u64, u64, u64) + Send + Sync + 'static,
+        F: Fn(u64, u64, u64, u64) + Send + Sync + 'static,
     {
         if manifest.is_empty() || game_path.is_empty() || chunk_base.is_empty() {
             return false;
@@ -281,7 +289,7 @@ impl Sophon for Game {
             .await
             .unwrap();
         let file = dl.get_filename().await.to_string();
-        let dll = dl.download(p.clone().join(&file), |_, _, _| {}).await;
+        let dll = dl.download(p.clone().join(&file), |_, _, _, _| {}).await;
 
         if dll.is_ok() {
             let m = fs::File::open(p.join(&file).as_path()).unwrap();
@@ -327,20 +335,23 @@ impl Sophon for Game {
                     })
                     .sum();
                 let progress_counter = Arc::new(AtomicU64::new(0));
-                let speed_tracker = Arc::new(SpeedTracker::new());
+                let net_tracker = Arc::new(SpeedTracker::new());
+                let disk_tracker = Arc::new(SpeedTracker::new());
                 let progress = Arc::new(progress);
 
                 // Monitor task for real-time progress/speed reporting using EMA smoothing
                 let monitor_handle = tokio::spawn({
                     let progress_counter = progress_counter.clone();
-                    let speed_tracker = speed_tracker.clone();
+                    let net_tracker = net_tracker.clone();
+                    let disk_tracker = disk_tracker.clone();
                     let progress = progress.clone();
                     async move {
                         loop {
-                            tokio::time::sleep(Duration::from_millis(200)).await;
+                            tokio::time::sleep(Duration::from_millis(500)).await;
                             let current = progress_counter.load(Ordering::SeqCst);
-                            let speed = speed_tracker.update();
-                            progress(current, total_bytes, speed);
+                            let net_speed = net_tracker.update();
+                            let disk_speed = disk_tracker.update();
+                            progress(current, total_bytes, net_speed, disk_speed);
                         }
                     }
                 });
@@ -357,8 +368,6 @@ impl Sophon for Game {
 
                     if output_path.exists() && valid {
                         progress_counter.fetch_add(file.size, Ordering::SeqCst);
-                        let processed = progress_counter.load(Ordering::SeqCst);
-                        progress(processed, total_bytes, 0);
                         continue;
                     } else {
                         if let Some(parent) = output_path.parent() {
@@ -372,6 +381,8 @@ impl Sophon for Game {
                         .into_iter()
                         .filter(|(v, _chunk)| version.as_str() == v.as_str())
                         .collect();
+                    let net_tracker = net_tracker.clone();
+                    let disk_tracker = disk_tracker.clone();
                     // File has patches to apply
                     if !filtered.is_empty() {
                         for (_v, chunk) in filtered.into_iter() {
@@ -421,8 +432,8 @@ impl Sophon for Game {
                                                     fs::File::create(&of).unwrap();
                                                 }
                                             } else {
-                                                let r = fs::remove_file(&of);
-                                                match r {
+                                                let _r = fs::remove_file(&of);
+                                                match _r {
                                                     Ok(_) => {
                                                         fs::File::create(&of).unwrap();
                                                     }
@@ -485,17 +496,13 @@ impl Sophon for Game {
                                 .await
                                 .unwrap();
 
-                                // Simple byte tracking for patch download
-                                let tracker = speed_tracker.clone();
-                                let mut last_bytes = 0u64;
+                                let net_t = net_tracker.clone();
+                                let disk_t = disk_tracker.clone();
 
                                 let dlf = dl
-                                    .download(chunkp.clone(), move |current, _total, _speed| {
-                                        let bytes_diff = current.saturating_sub(last_bytes);
-                                        if bytes_diff > 0 {
-                                            tracker.add_bytes(bytes_diff);
-                                        }
-                                        last_bytes = current;
+                                    .download(chunkp.clone(), move |_, _, ns, ds| {
+                                        net_t.add_bytes(ns);
+                                        disk_t.add_bytes(ds);
                                     })
                                     .await;
 
@@ -537,8 +544,8 @@ impl Sophon for Game {
                                                         fs::File::create(&of).unwrap();
                                                     }
                                                 } else {
-                                                    let r = fs::remove_file(&of);
-                                                    match r {
+                                                    let _r = fs::remove_file(&of);
+                                                    match _r {
                                                         Ok(_) => {
                                                             fs::File::create(&of).unwrap();
                                                         }
@@ -605,16 +612,14 @@ impl Sophon for Game {
                                 .await;
                         if r2 {
                             progress_counter.fetch_add(file.size, Ordering::SeqCst);
-                            let processed = progress_counter.load(Ordering::SeqCst);
-                            progress(processed, total_bytes, 0);
+                        } else {
+                            continue;
                         }
-                    } else {
-                        continue;
                     }
                 }
                 monitor_handle.abort();
                 // All files are complete make sure we report done just in case
-                progress(total_bytes, total_bytes, 0);
+                progress(total_bytes, total_bytes, 0, 0);
                 let moved = move_all(staging.as_ref(), game_path.as_ref()).await;
                 if moved.is_ok() {
                     // Delete all unneeded files after applying the patch and purging the temp directory
@@ -655,7 +660,7 @@ impl Sophon for Game {
         progress: F,
     ) -> bool
     where
-        F: Fn(u64, u64, u64) + Send + Sync + 'static,
+        F: Fn(u64, u64, u64, u64) + Send + Sync + 'static,
     {
         if manifest.is_empty() || game_path.is_empty() || chunk_base.is_empty() {
             return false;
@@ -679,7 +684,7 @@ impl Sophon for Game {
             .await
             .unwrap();
         let file = dl.get_filename().await.to_string();
-        let dll = dl.download(p.clone().join(&file), |_, _, _| {}).await;
+        let dll = dl.download(p.clone().join(&file), |_, _, _, _| {}).await;
 
         if dll.is_ok() {
             let m = fs::File::open(p.join(&file).as_path()).unwrap();
@@ -715,20 +720,23 @@ impl Sophon for Game {
                     .map(|f| f.size)
                     .sum();
                 let progress_counter = Arc::new(AtomicU64::new(0));
-                let speed_tracker = Arc::new(SpeedTracker::new());
+                let net_tracker = Arc::new(SpeedTracker::new());
+                let disk_tracker = Arc::new(SpeedTracker::new());
                 let progress = Arc::new(progress);
 
                 // Monitor task for real-time progress/speed reporting using EMA smoothing
                 let monitor_handle = tokio::spawn({
                     let progress_counter = progress_counter.clone();
-                    let speed_tracker = speed_tracker.clone();
+                    let net_tracker = net_tracker.clone();
+                    let disk_tracker = disk_tracker.clone();
                     let progress = progress.clone();
                     async move {
                         loop {
-                            tokio::time::sleep(Duration::from_millis(200)).await;
+                            tokio::time::sleep(Duration::from_millis(500)).await;
                             let current = progress_counter.load(Ordering::SeqCst);
-                            let speed = speed_tracker.update();
-                            progress(current, total_bytes, speed);
+                            let net_speed = net_tracker.update();
+                            let disk_speed = disk_tracker.update();
+                            progress(current, total_bytes, net_speed, disk_speed);
                         }
                     }
                 });
@@ -758,7 +766,8 @@ impl Sophon for Game {
 
                     let stealers = stealers.clone();
                     let progress_counter = progress_counter.clone();
-                    let speed_tracker = speed_tracker.clone();
+                    let net_tracker = net_tracker.clone();
+                    let disk_tracker = disk_tracker.clone();
                     let progress_cb = progress.clone();
                     let chunks_dir = chunks.clone();
                     let mainp = mainpbuf.clone();
@@ -784,9 +793,10 @@ impl Sophon for Game {
                             };
                             let permit = file_sem.clone().acquire_owned().await.unwrap();
 
-                            let ct = tokio::spawn({
+                            let ct = tokio::task::spawn({
                                 let progress_counter = progress_counter.clone();
-                                let speed_tracker = speed_tracker.clone();
+                                let net_tracker = net_tracker.clone();
+                                let disk_tracker = disk_tracker.clone();
                                 let progress_cb = progress_cb.clone();
                                 let mainp = mainp.clone();
                                 let chunks_dir = chunks_dir.clone();
@@ -801,7 +811,8 @@ impl Sophon for Game {
                                         client.clone(),
                                         is_fast,
                                         None,
-                                        speed_tracker.clone(),
+                                        net_tracker.clone(),
+                                        disk_tracker.clone(),
                                     )
                                     .await;
 
@@ -817,6 +828,8 @@ impl Sophon for Game {
                                         progress_cb.clone(),
                                         total_bytes,
                                         is_fast,
+                                        net_tracker.clone(),
+                                        disk_tracker.clone(),
                                     )
                                     .await;
                                     drop(permit);
@@ -835,7 +848,7 @@ impl Sophon for Game {
                 }
                 monitor_handle.abort();
                 // All files are complete make sure we report done just in case
-                progress(total_bytes, total_bytes, 0);
+                progress(total_bytes, total_bytes, 0, 0);
                 if p.exists() {
                     fs::remove_dir_all(p.as_path()).unwrap();
                 }
@@ -856,7 +869,7 @@ impl Sophon for Game {
         progress: F,
     ) -> bool
     where
-        F: Fn(u64, u64, u64) + Send + Sync + 'static,
+        F: Fn(u64, u64, u64, u64) + Send + Sync + 'static,
     {
         if manifest.is_empty() || game_path.is_empty() || chunk_base.is_empty() {
             return false;
@@ -880,7 +893,7 @@ impl Sophon for Game {
             .await
             .unwrap();
         let file = dl.get_filename().await.to_string();
-        let dll = dl.download(p.clone().join(&file), |_, _, _| {}).await;
+        let dll = dl.download(p.clone().join(&file), |_, _, _, _| {}).await;
 
         if dll.is_ok() {
             let m = fs::File::open(p.join(&file).as_path()).unwrap();
@@ -929,20 +942,23 @@ impl Sophon for Game {
                     })
                     .sum();
                 let progress_counter = Arc::new(AtomicU64::new(0));
-                let speed_tracker = Arc::new(SpeedTracker::new());
+                let net_tracker = Arc::new(SpeedTracker::new());
+                let disk_tracker = Arc::new(SpeedTracker::new());
                 let progress = Arc::new(progress);
 
                 // Monitor task for real-time progress/speed reporting using EMA smoothing
                 let monitor_handle = tokio::spawn({
                     let progress_counter = progress_counter.clone();
-                    let speed_tracker = speed_tracker.clone();
+                    let net_tracker = net_tracker.clone();
+                    let disk_tracker = disk_tracker.clone();
                     let progress = progress.clone();
                     async move {
                         loop {
-                            tokio::time::sleep(Duration::from_millis(200)).await;
+                            tokio::time::sleep(Duration::from_millis(500)).await;
                             let current = progress_counter.load(Ordering::SeqCst);
-                            let speed = speed_tracker.update();
-                            progress(current, total_bytes, speed);
+                            let net_speed = net_tracker.update();
+                            let disk_speed = disk_tracker.update();
+                            progress(current, total_bytes, net_speed, disk_speed);
                         }
                     }
                 });
@@ -972,7 +988,8 @@ impl Sophon for Game {
 
                     let stealers = stealers.clone();
                     let progress_counter = progress_counter.clone();
-                    let speed_tracker = speed_tracker.clone();
+                    let net_tracker = net_tracker.clone();
+                    let disk_tracker = disk_tracker.clone();
                     let chunks_dir = chunks.clone();
                     let chunk_base = chunk_base.clone();
                     let version = version.clone();
@@ -999,7 +1016,8 @@ impl Sophon for Game {
 
                             let ct = tokio::spawn({
                                 let progress_counter = progress_counter.clone();
-                                let speed_tracker = speed_tracker.clone();
+                                let net_tracker = net_tracker.clone();
+                                let disk_tracker = disk_tracker.clone();
                                 let chunks_dir = chunks_dir.clone();
                                 let chunk_base = chunk_base.clone();
                                 let version = version.clone();
@@ -1018,9 +1036,15 @@ impl Sophon for Game {
                                             let pn = chunk.patch_name;
                                             let chunkp = chunks_dir.join(pn.clone());
 
-                                            if chunkp.exists() {
+                                            let cvalid = validate_checksum(
+                                                chunkp.as_path(),
+                                                chunk.patch_md5.to_ascii_lowercase(),
+                                            )
+                                            .await;
+                                            if chunkp.exists() && cvalid {
                                                 progress_counter
                                                     .fetch_add(chunk_task.size, Ordering::SeqCst);
+                                                drop(permit);
                                                 return;
                                             }
 
@@ -1032,23 +1056,14 @@ impl Sophon for Game {
                                             .unwrap();
 
                                             // Simple byte tracking for preload download
-                                            let tracker = speed_tracker.clone();
-                                            let mut last_bytes = 0u64;
-
+                                            let net_t = net_tracker.clone();
+                                            let disk_t = disk_tracker.clone();
                                             let dlf = dl
-                                                .download(
-                                                    chunkp.clone(),
-                                                    move |current, _total, _speed| {
-                                                        let bytes_diff =
-                                                            current.saturating_sub(last_bytes);
-                                                        if bytes_diff > 0 {
-                                                            tracker.add_bytes(bytes_diff);
-                                                        }
-                                                        last_bytes = current;
-                                                    },
-                                                )
+                                                .download(chunkp.clone(), move |_, _, ns, ds| {
+                                                    net_t.add_bytes(ns);
+                                                    disk_t.add_bytes(ds);
+                                                })
                                                 .await;
-
                                             let cvalid = validate_checksum(
                                                 chunkp.as_path(),
                                                 chunk.patch_md5.to_ascii_lowercase(),
@@ -1058,6 +1073,11 @@ impl Sophon for Game {
                                             if dlf.is_ok() && cvalid {
                                                 progress_counter
                                                     .fetch_add(chunk_task.size, Ordering::SeqCst);
+                                            } else {
+                                                // Handle download or validation failure for this chunk
+                                                // For now, we just let the permit drop and the task finish
+                                                // without incrementing progress, implying a failure or retry mechanism
+                                                // would be needed here if strict success is required.
                                             }
                                         }
                                     }
@@ -1077,7 +1097,7 @@ impl Sophon for Game {
                 }
                 monitor_handle.abort();
                 // All files are complete make sure we report done just in case
-                progress(total_bytes, total_bytes, 0);
+                progress(total_bytes, total_bytes, 0, 0);
                 true
             } else {
                 false
@@ -1096,7 +1116,8 @@ async fn process_file_chunks(
     client: Arc<ClientWithMiddleware>,
     is_fast: bool,
     cancel_token: Option<Arc<AtomicBool>>,
-    speed_tracker: Arc<SpeedTracker>,
+    net_tracker: Arc<SpeedTracker>,
+    disk_tracker: Arc<SpeedTracker>,
 ) {
     if chunk_task.r#type == 64 {
         return;
@@ -1128,11 +1149,14 @@ async fn process_file_chunks(
     let (write_tx, mut write_rx) = tokio::sync::mpsc::channel::<(Vec<u8>, u64)>(600);
 
     let writer_handle = tokio::spawn({
+        let disk_tracker = disk_tracker.clone();
         async move {
             let mut writer = tokio::io::BufWriter::with_capacity(10240, file);
             while let Some((buf, offset)) = write_rx.recv().await {
+                let len = buf.len() as u64;
                 writer.seek(SeekFrom::Start(offset)).await.unwrap();
                 writer.write_all(&buf).await.unwrap();
+                disk_tracker.add_bytes(len);
             }
             writer.flush().await.unwrap();
             drop(writer);
@@ -1165,7 +1189,8 @@ async fn process_file_chunks(
         let client = Arc::clone(&client);
         let chunk_base = chunk_base.clone();
         let cancel_token = cancel_token.clone();
-        let speed_tracker = speed_tracker.clone();
+        let net_tracker = net_tracker.clone();
+        let disk_tracker = disk_tracker.clone();
 
         let mut retry_tasks = Vec::new();
         let handle = tokio::task::spawn(async move {
@@ -1196,7 +1221,8 @@ async fn process_file_chunks(
                     let client = client.clone();
                     let write_tx = write_tx.clone();
                     let cancel_token = cancel_token.clone();
-                    let speed_tracker = speed_tracker.clone();
+                    let net_tracker = net_tracker.clone();
+                    let disk_tracker = disk_tracker.clone();
                     async move {
                         if let Some(token) = &cancel_token {
                             if token.load(Ordering::Relaxed) {
@@ -1212,16 +1238,31 @@ async fn process_file_chunks(
                         .with_cancel_token(cancel_token.clone());
 
                         // Simple byte tracking - just report bytes downloaded
-                        let tracker = speed_tracker.clone();
-                        let mut last_bytes = 0u64;
+                        let net_t = net_tracker.clone();
+                        let disk_t = disk_tracker.clone();
+                        let mut last_net = 0u64;
+                        let mut last_disk = 0u64;
                         let dl_result = dl
-                            .download(chunk_path.clone(), move |current, _total, _speed| {
-                                let bytes_diff = current.saturating_sub(last_bytes);
-                                if bytes_diff > 0 {
-                                    tracker.add_bytes(bytes_diff);
-                                }
-                                last_bytes = current;
-                            })
+                            .download(
+                                chunk_path.clone(),
+                                move |current, _total, _net_speed, _disk_speed| {
+                                    let net_diff = current.saturating_sub(last_net);
+                                    if net_diff > 0 {
+                                        net_t.add_bytes(net_diff);
+                                    }
+                                    last_net = current;
+
+                                    // Track disk speed from AsyncDownloader as well
+                                    // Wait, current in AsyncDownloader refers to bytes WRITTEN to disk?
+                                    // Let's check AsyncDownloader::download again.
+                                    // Yes, current is written_bytes.
+                                    let disk_diff = current.saturating_sub(last_disk);
+                                    if disk_diff > 0 {
+                                        disk_t.add_bytes(disk_diff);
+                                    }
+                                    last_disk = current;
+                                },
+                            )
                             .await;
 
                         if dl_result.is_ok() {
@@ -1247,16 +1288,27 @@ async fn process_file_chunks(
                                 }
                             }
                             // Retry the chunk
-                            let tracker = speed_tracker.clone();
-                            let mut last_bytes = 0u64;
+                            let net_t = net_tracker.clone();
+                            let disk_t = disk_tracker.clone();
+                            let mut last_net = 0u64;
+                            let mut last_disk = 0u64;
                             let dl_result2 = dl
-                                .download(chunk_path.clone(), move |current, _total, _speed| {
-                                    let bytes_diff = current.saturating_sub(last_bytes);
-                                    if bytes_diff > 0 {
-                                        tracker.add_bytes(bytes_diff);
-                                    }
-                                    last_bytes = current;
-                                })
+                                .download(
+                                    chunk_path.clone(),
+                                    move |current, _total, _net_speed, _disk_speed| {
+                                        let net_diff = current.saturating_sub(last_net);
+                                        if net_diff > 0 {
+                                            net_t.add_bytes(net_diff);
+                                        }
+                                        last_net = current;
+
+                                        let disk_diff = current.saturating_sub(last_disk);
+                                        if disk_diff > 0 {
+                                            disk_t.add_bytes(disk_diff);
+                                        }
+                                        last_disk = current;
+                                    },
+                                )
                                 .await;
 
                             if dl_result2.is_ok() {
@@ -1282,16 +1334,27 @@ async fn process_file_chunks(
                                     }
                                 }
                                 // Retry again
-                                let tracker = speed_tracker.clone();
-                                let mut last_bytes = 0u64;
+                                let net_t = net_tracker.clone();
+                                let disk_t = disk_tracker.clone();
+                                let mut last_net = 0u64;
+                                let mut last_disk = 0u64;
                                 let dl_result3 = dl
-                                    .download(chunk_path.clone(), move |current, _total, _speed| {
-                                        let bytes_diff = current.saturating_sub(last_bytes);
-                                        if bytes_diff > 0 {
-                                            tracker.add_bytes(bytes_diff);
-                                        }
-                                        last_bytes = current;
-                                    })
+                                    .download(
+                                        chunk_path.clone(),
+                                        move |current, _total, _net_speed, _disk_speed| {
+                                            let net_diff = current.saturating_sub(last_net);
+                                            if net_diff > 0 {
+                                                net_t.add_bytes(net_diff);
+                                            }
+                                            last_net = current;
+
+                                            let disk_diff = current.saturating_sub(last_disk);
+                                            if disk_diff > 0 {
+                                                disk_t.add_bytes(disk_diff);
+                                            }
+                                            last_disk = current;
+                                        },
+                                    )
                                     .await;
 
                                 if dl_result3.is_ok() {
@@ -1344,11 +1407,13 @@ async fn validate_file<F>(
     fp: PathBuf,
     client: Arc<ClientWithMiddleware>,
     progress_counter: Arc<AtomicU64>,
-    progress_cb: Arc<F>,
-    total_bytes: u64,
+    _progress_cb: Arc<F>,
+    _total_bytes: u64,
     is_fast: bool,
+    net_tracker: Arc<SpeedTracker>,
+    disk_tracker: Arc<SpeedTracker>,
 ) where
-    F: Fn(u64, u64, u64) + Send + Sync + 'static,
+    F: Fn(u64, u64, u64, u64) + Send + Sync + 'static,
 {
     let valid = validate_checksum(fp.as_path(), chunk_task.md5.to_ascii_lowercase()).await;
     if !valid {
@@ -1369,7 +1434,8 @@ async fn validate_file<F>(
             client.clone(),
             is_fast,
             None,
-            Arc::new(SpeedTracker::new()),
+            net_tracker.clone(),
+            disk_tracker.clone(),
         )
         .await;
         let revalid = validate_checksum(fp.as_path(), chunk_task.md5.to_ascii_lowercase()).await;
@@ -1391,7 +1457,8 @@ async fn validate_file<F>(
                 client.clone(),
                 is_fast,
                 None,
-                Arc::new(SpeedTracker::new()),
+                net_tracker.clone(),
+                disk_tracker.clone(),
             )
             .await;
             let revalid2 =
@@ -1414,7 +1481,8 @@ async fn validate_file<F>(
                     client.clone(),
                     is_fast,
                     None,
-                    Arc::new(SpeedTracker::new()),
+                    net_tracker.clone(),
+                    disk_tracker.clone(),
                 )
                 .await;
                 let revalid3 =
@@ -1425,8 +1493,7 @@ async fn validate_file<F>(
                         chunk_task.name.clone()
                     );
                 } else {
-                    let processed = progress_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
-                    progress_cb(processed, total_bytes, 0);
+                    let _processed = progress_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
                     for c in &chunk_task.chunks {
                         let chunk_path = chunks_dir.join(&c.chunk_name);
                         if chunk_path.exists() {
@@ -1441,8 +1508,7 @@ async fn validate_file<F>(
                     }
                 }
             } else {
-                let processed = progress_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
-                progress_cb(processed, total_bytes, 0);
+                let _processed = progress_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
                 for c in &chunk_task.chunks {
                     let chunk_path = chunks_dir.join(&c.chunk_name);
                     if chunk_path.exists() {
@@ -1457,8 +1523,7 @@ async fn validate_file<F>(
                 }
             }
         } else {
-            let processed = progress_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
-            progress_cb(processed, total_bytes, 0);
+            let _processed = progress_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
             for c in &chunk_task.chunks {
                 let chunk_path = chunks_dir.join(&c.chunk_name);
                 if chunk_path.exists() {
@@ -1473,8 +1538,7 @@ async fn validate_file<F>(
             }
         }
     } else {
-        let processed = progress_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
-        progress_cb(processed, total_bytes, 0);
+        let _processed = progress_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
         for c in &chunk_task.chunks {
             let chunk_path = chunks_dir.join(&c.chunk_name);
             if chunk_path.exists() {

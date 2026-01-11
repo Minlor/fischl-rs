@@ -21,7 +21,7 @@ impl Kuro for Game {
         cancel_token: Option<Arc<AtomicBool>>,
     ) -> bool
     where
-        F: Fn(u64, u64, u64) + Send + Sync + 'static,
+        F: Fn(u64, u64, u64, u64) + Send + Sync + 'static,
     {
         if manifest.is_empty() || game_path.is_empty() || base_url.is_empty() {
             return false;
@@ -45,7 +45,7 @@ impl Kuro for Game {
             .unwrap()
             .with_cancel_token(cancel_token.clone());
         let dll = dl
-            .download(dlp.clone().join("manifest.json"), |_, _, _| {})
+            .download(dlp.clone().join("manifest.json"), |_, _, _, _| {})
             .await;
 
         if dll.is_ok() {
@@ -63,20 +63,23 @@ impl Kuro for Game {
 
             let total_bytes: u64 = files.resource.iter().map(|f| f.size).sum();
             let progress_counter = Arc::new(AtomicU64::new(0));
-            let speed_tracker = Arc::new(SpeedTracker::new());
+            let net_tracker = Arc::new(SpeedTracker::new());
+            let disk_tracker = Arc::new(SpeedTracker::new());
             let progress = Arc::new(progress);
 
             // Monitor task using EMA smoothing
             let monitor_handle = tokio::spawn({
                 let progress_counter = progress_counter.clone();
-                let speed_tracker = speed_tracker.clone();
+                let net_tracker = net_tracker.clone();
+                let disk_tracker = disk_tracker.clone();
                 let progress = progress.clone();
                 async move {
                     loop {
-                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        tokio::time::sleep(Duration::from_millis(500)).await;
                         let current = progress_counter.load(Ordering::SeqCst);
-                        let speed = speed_tracker.update();
-                        progress(current, total_bytes, speed);
+                        let net_speed = net_tracker.update();
+                        let disk_speed = disk_tracker.update();
+                        progress(current, total_bytes, net_speed, disk_speed);
                     }
                 }
             });
@@ -106,7 +109,8 @@ impl Kuro for Game {
 
                 let stealers = stealers.clone();
                 let progress_counter = progress_counter.clone();
-                let speed_tracker = speed_tracker.clone();
+                let net_tracker = net_tracker.clone();
+                let disk_tracker = disk_tracker.clone();
                 let chunk_base = base_url.clone();
                 let staging = staging.clone();
                 let client = client.clone();
@@ -138,7 +142,8 @@ impl Kuro for Game {
 
                         let ct = tokio::spawn({
                             let progress_counter = progress_counter.clone();
-                            let speed_tracker = speed_tracker.clone();
+                            let net_tracker = net_tracker.clone();
+                            let disk_tracker = disk_tracker.clone();
                             let chunk_base = chunk_base.clone();
                             let staging = staging.clone();
                             let client = client.clone();
@@ -172,18 +177,26 @@ impl Kuro for Game {
                                 .with_cancel_token(cancel_token.clone());
 
                                 // Simple byte tracking for download
-                                let tracker = speed_tracker.clone();
-                                let mut last_bytes = 0u64;
+                                let net_t = net_tracker.clone();
+                                let disk_t = disk_tracker.clone();
+                                let mut last_net = 0u64;
+                                let mut last_disk = 0u64;
 
                                 let dlf = dl
                                     .download(
                                         staging_dir.clone(),
-                                        move |current, _total, _speed| {
-                                            let bytes_diff = current.saturating_sub(last_bytes);
-                                            if bytes_diff > 0 {
-                                                tracker.add_bytes(bytes_diff);
+                                        move |current, _total, _net_speed, _disk_speed| {
+                                            let net_diff = current.saturating_sub(last_net);
+                                            if net_diff > 0 {
+                                                net_t.add_bytes(net_diff);
                                             }
-                                            last_bytes = current;
+                                            last_net = current;
+
+                                            let disk_diff = current.saturating_sub(last_disk);
+                                            if disk_diff > 0 {
+                                                disk_t.add_bytes(disk_diff);
+                                            }
+                                            last_disk = current;
                                         },
                                     )
                                     .await;
@@ -206,18 +219,26 @@ impl Kuro for Game {
                                     .unwrap()
                                     .with_cancel_token(cancel_token.clone());
                                     // Simple byte tracking for retry
-                                    let tracker = speed_tracker.clone();
-                                    let mut last_bytes = 0u64;
+                                    let net_t = net_tracker.clone();
+                                    let disk_t = disk_tracker.clone();
+                                    let mut last_net = 0u64;
+                                    let mut last_disk = 0u64;
 
                                     let dlf = dl
                                         .download(
                                             staging_dir.clone(),
-                                            move |current, _total, _speed| {
-                                                let bytes_diff = current.saturating_sub(last_bytes);
-                                                if bytes_diff > 0 {
-                                                    tracker.add_bytes(bytes_diff);
+                                            move |current, _total, _net_speed, _disk_speed| {
+                                                let net_diff = current.saturating_sub(last_net);
+                                                if net_diff > 0 {
+                                                    net_t.add_bytes(net_diff);
                                                 }
-                                                last_bytes = current;
+                                                last_net = current;
+
+                                                let disk_diff = current.saturating_sub(last_disk);
+                                                if disk_diff > 0 {
+                                                    disk_t.add_bytes(disk_diff);
+                                                }
+                                                last_disk = current;
                                             },
                                         )
                                         .await;
@@ -240,19 +261,27 @@ impl Kuro for Game {
                                         .await
                                         .unwrap();
                                         // Simple byte tracking for 2nd retry
-                                        let tracker = speed_tracker.clone();
-                                        let mut last_bytes = 0u64;
+                                        let net_t = net_tracker.clone();
+                                        let disk_t = disk_tracker.clone();
+                                        let mut last_net = 0u64;
+                                        let mut last_disk = 0u64;
 
                                         let dlf = dl
                                             .download(
                                                 staging_dir.clone(),
-                                                move |current, _total, _speed| {
-                                                    let bytes_diff =
-                                                        current.saturating_sub(last_bytes);
-                                                    if bytes_diff > 0 {
-                                                        tracker.add_bytes(bytes_diff);
+                                                move |current, _total, _net_speed, _disk_speed| {
+                                                    let net_diff = current.saturating_sub(last_net);
+                                                    if net_diff > 0 {
+                                                        net_t.add_bytes(net_diff);
                                                     }
-                                                    last_bytes = current;
+                                                    last_net = current;
+
+                                                    let disk_diff =
+                                                        current.saturating_sub(last_disk);
+                                                    if disk_diff > 0 {
+                                                        disk_t.add_bytes(disk_diff);
+                                                    }
+                                                    last_disk = current;
                                                 },
                                             )
                                             .await;
@@ -289,16 +318,9 @@ impl Kuro for Game {
                 let _ = handle.await;
             }
 
-            if let Some(token) = &cancel_token {
-                if token.load(Ordering::Relaxed) {
-                    monitor_handle.abort();
-                    return false;
-                }
-            }
-
             monitor_handle.abort();
             // All files are complete make sure we report done just in case
-            progress(total_bytes, total_bytes, 0);
+            progress(total_bytes, total_bytes, 0, 0);
             let moved = move_all(staging.as_ref(), game_path.as_ref()).await;
             if moved.is_ok() {
                 tokio::fs::remove_dir_all(dlp.as_path()).await.unwrap();
@@ -318,7 +340,7 @@ impl Kuro for Game {
         progress: F,
     ) -> bool
     where
-        F: Fn(u64, u64, u64) + Send + Sync + 'static,
+        F: Fn(u64, u64, u64, u64) + Send + Sync + 'static,
     {
         if manifest.is_empty()
             || game_path.is_empty()
@@ -345,7 +367,7 @@ impl Kuro for Game {
             .await
             .unwrap();
         let dll = dl
-            .download(p.clone().join("manifest.json"), |_, _, _| {})
+            .download(p.clone().join("manifest.json"), |_, _, _, _| {})
             .await;
 
         if dll.is_ok() {
@@ -363,7 +385,26 @@ impl Kuro for Game {
 
             let total_bytes: u64 = files.resource.iter().map(|f| f.size).sum();
             let progress_counter = Arc::new(AtomicU64::new(0));
+            let net_tracker = Arc::new(SpeedTracker::new());
+            let disk_tracker = Arc::new(SpeedTracker::new());
             let progress = Arc::new(progress);
+
+            // Monitor task for real-time progress/speed reporting using EMA smoothing
+            let monitor_handle = tokio::spawn({
+                let progress_counter = progress_counter.clone();
+                let net_tracker = net_tracker.clone();
+                let disk_tracker = disk_tracker.clone();
+                let progress = progress.clone();
+                async move {
+                    loop {
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        let current = progress_counter.load(Ordering::SeqCst);
+                        let net_speed = net_tracker.update();
+                        let disk_speed = disk_tracker.update();
+                        progress(current, total_bytes, net_speed, disk_speed);
+                    }
+                }
+            });
 
             if preloaded {
                 // PGR has krzips extract them if they exist
@@ -381,8 +422,6 @@ impl Kuro for Game {
                             if r {
                                 let fsize = z.entries.iter().map(|f| f.size).sum();
                                 progress_counter.fetch_add(fsize, Ordering::SeqCst);
-                                let processed = progress_counter.load(Ordering::SeqCst);
-                                progress(processed, total_bytes, 0);
                             }
                         }
                     }
@@ -401,8 +440,6 @@ impl Kuro for Game {
                         if krd {
                             let fsize = d.entries.iter().map(|f| f.size).sum();
                             progress_counter.fetch_add(fsize, Ordering::SeqCst);
-                            let processed = progress_counter.load(Ordering::SeqCst);
-                            progress(processed, total_bytes, 0);
                         } else {
                             eprintln!("Failed to apply krdiff!")
                         }
@@ -432,7 +469,8 @@ impl Kuro for Game {
                     }
                 }
                 // All files are complete make sure we report done just in case
-                progress(total_bytes, total_bytes, 0);
+                monitor_handle.abort();
+                progress(total_bytes, total_bytes, 0, 0);
                 let moved = move_all(staging.as_ref(), game_path.as_ref()).await;
                 if moved.is_ok() {
                     tokio::fs::remove_dir_all(p.as_path()).await.unwrap();
@@ -474,6 +512,8 @@ impl Kuro for Game {
 
                     let stealers = stealers.clone();
                     let progress_counter = progress_counter.clone();
+                    let net_tracker = net_tracker.clone();
+                    let disk_tracker = disk_tracker.clone();
                     let progress_cb = progress.clone();
                     let chunk_res = base_resources.clone();
                     let chunks_zip = base_zip.clone();
@@ -501,7 +541,9 @@ impl Kuro for Game {
 
                             let ct = tokio::spawn({
                                 let progress_counter = progress_counter.clone();
-                                let progress_cb = progress_cb.clone();
+                                let net_tracker = net_tracker.clone();
+                                let disk_tracker = disk_tracker.clone();
+                                let _progress_cb = progress_cb.clone();
                                 let chunk_res = chunk_res.clone();
                                 let chunks_zip = chunks_zip.clone();
                                 let staging = staging.clone();
@@ -517,8 +559,6 @@ impl Kuro for Game {
                                     if staging_dir.exists() && cvalid {
                                         progress_counter
                                             .fetch_add(chunk_task.size, Ordering::SeqCst);
-                                        let processed = progress_counter.load(Ordering::SeqCst);
-                                        progress_cb(processed, total_bytes, 0);
                                         return;
                                     }
 
@@ -538,7 +578,14 @@ impl Kuro for Game {
                                     )
                                     .await
                                     .unwrap();
-                                    let dlf = dl.download(staging_dir.clone(), |_, _, _| {}).await;
+                                    let net_t = net_tracker.clone();
+                                    let disk_t = disk_tracker.clone();
+                                    let dlf = dl
+                                        .download(staging_dir.clone(), move |_, _, ns, ds| {
+                                            net_t.add_bytes(ns);
+                                            disk_t.add_bytes(ds);
+                                        })
+                                        .await;
                                     let cvalid = validate_checksum(
                                         staging_dir.as_path(),
                                         chunk_task.md5.to_ascii_lowercase(),
@@ -548,8 +595,6 @@ impl Kuro for Game {
                                     if dlf.is_ok() && cvalid {
                                         progress_counter
                                             .fetch_add(chunk_task.size, Ordering::SeqCst);
-                                        let processed = progress_counter.load(Ordering::SeqCst);
-                                        progress_cb(processed, total_bytes, 0);
                                     } else {
                                         // Retry download
                                         let mut dl = AsyncDownloader::new(
@@ -558,8 +603,14 @@ impl Kuro for Game {
                                         )
                                         .await
                                         .unwrap();
-                                        let dlf =
-                                            dl.download(staging_dir.clone(), |_, _, _| {}).await;
+                                        let net_t = net_tracker.clone();
+                                        let disk_t = disk_tracker.clone();
+                                        let dlf = dl
+                                            .download(staging_dir.clone(), move |_, _, ns, ds| {
+                                                net_t.add_bytes(ns);
+                                                disk_t.add_bytes(ds);
+                                            })
+                                            .await;
                                         let cvalid = validate_checksum(
                                             staging_dir.as_path(),
                                             chunk_task.md5.to_ascii_lowercase(),
@@ -569,8 +620,6 @@ impl Kuro for Game {
                                         if dlf.is_ok() && cvalid {
                                             progress_counter
                                                 .fetch_add(chunk_task.size, Ordering::SeqCst);
-                                            let processed = progress_counter.load(Ordering::SeqCst);
-                                            progress_cb(processed, total_bytes, 0);
                                         } else {
                                             // Retry 2nd time
                                             let mut dl = AsyncDownloader::new(
@@ -579,8 +628,16 @@ impl Kuro for Game {
                                             )
                                             .await
                                             .unwrap();
+                                            let net_t = net_tracker.clone();
+                                            let disk_t = disk_tracker.clone();
                                             let dlf = dl
-                                                .download(staging_dir.clone(), |_, _, _| {})
+                                                .download(
+                                                    staging_dir.clone(),
+                                                    move |_, _, ns, ds| {
+                                                        net_t.add_bytes(ns);
+                                                        disk_t.add_bytes(ds);
+                                                    },
+                                                )
                                                 .await;
                                             let cvalid = validate_checksum(
                                                 staging_dir.as_path(),
@@ -591,9 +648,6 @@ impl Kuro for Game {
                                             if dlf.is_ok() && cvalid {
                                                 progress_counter
                                                     .fetch_add(chunk_task.size, Ordering::SeqCst);
-                                                let processed =
-                                                    progress_counter.load(Ordering::SeqCst);
-                                                progress_cb(processed, total_bytes, 0);
                                             } else {
                                                 eprintln!(
                                                     "Failed to validate patch file {} after 2 retries!",
@@ -671,8 +725,9 @@ impl Kuro for Game {
                         }
                     }
                 }
+                monitor_handle.abort();
                 // All files are complete make sure we report done just in case
-                progress(total_bytes, total_bytes, 0);
+                progress(total_bytes, total_bytes, 0, 0);
                 let moved = move_all(staging.as_ref(), game_path.as_ref()).await;
                 if moved.is_ok() {
                     tokio::fs::remove_dir_all(p.as_path()).await.unwrap();
@@ -703,7 +758,7 @@ impl Kuro for Game {
         progress: F,
     ) -> bool
     where
-        F: Fn(u64, u64, u64) + Send + Sync + 'static,
+        F: Fn(u64, u64, u64, u64) + Send + Sync + 'static,
     {
         if manifest.is_empty() || game_path.is_empty() || base_url.is_empty() {
             return false;
@@ -726,7 +781,7 @@ impl Kuro for Game {
             .await
             .unwrap();
         let dll = dl
-            .download(p.clone().join("manifest.json"), |_, _, _| {})
+            .download(p.clone().join("manifest.json"), |_, _, _, _| {})
             .await;
 
         if dll.is_ok() {
@@ -739,7 +794,26 @@ impl Kuro for Game {
 
             let total_bytes: u64 = files.resource.iter().map(|f| f.size).sum();
             let progress_counter = Arc::new(AtomicU64::new(0));
+            let net_tracker = Arc::new(SpeedTracker::new());
+            let disk_tracker = Arc::new(SpeedTracker::new());
             let progress = Arc::new(progress);
+
+            // Monitor task for real-time progress/speed reporting using EMA smoothing
+            let monitor_handle = tokio::spawn({
+                let progress_counter = progress_counter.clone();
+                let net_tracker = net_tracker.clone();
+                let disk_tracker = disk_tracker.clone();
+                let progress = progress.clone();
+                async move {
+                    loop {
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        let current = progress_counter.load(Ordering::SeqCst);
+                        let net_speed = net_tracker.update();
+                        let disk_speed = disk_tracker.update();
+                        progress(current, total_bytes, net_speed, disk_speed);
+                    }
+                }
+            });
 
             // Start of download code
             let injector = Arc::new(Injector::<KuroResource>::new());
@@ -766,6 +840,8 @@ impl Kuro for Game {
 
                 let stealers = stealers.clone();
                 let progress_counter = progress_counter.clone();
+                let net_tracker = net_tracker.clone();
+                let disk_tracker = disk_tracker.clone();
                 let progress_cb = progress.clone();
                 let chunk_base = base_url.clone();
                 let staging = mainp.clone();
@@ -792,7 +868,9 @@ impl Kuro for Game {
 
                         let ct = tokio::spawn({
                             let progress_counter = progress_counter.clone();
-                            let progress_cb = progress_cb.clone();
+                            let net_tracker = net_tracker.clone();
+                            let disk_tracker = disk_tracker.clone();
+                            let _progress_cb = progress_cb.clone();
                             let chunk_base = chunk_base.clone();
                             let staging = staging.clone();
                             let client = client.clone();
@@ -810,8 +888,6 @@ impl Kuro for Game {
 
                                 if staging_dir.exists() && cvalid {
                                     progress_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
-                                    let processed = progress_counter.load(Ordering::SeqCst);
-                                    progress_cb(processed, total_bytes, 0);
                                     return;
                                 }
 
@@ -822,7 +898,14 @@ impl Kuro for Game {
                                 )
                                 .await
                                 .unwrap();
-                                let dlf = dl.download(staging_dir.clone(), |_, _, _| {}).await;
+                                let net_t = net_tracker.clone();
+                                let disk_t = disk_tracker.clone();
+                                let dlf = dl
+                                    .download(staging_dir.clone(), move |_, _, ns, ds| {
+                                        net_t.add_bytes(ns);
+                                        disk_t.add_bytes(ds);
+                                    })
+                                    .await;
                                 let cvalid = if is_fast {
                                     staging_dir.metadata().unwrap().len() == chunk_task.size
                                 } else {
@@ -835,8 +918,6 @@ impl Kuro for Game {
 
                                 if dlf.is_ok() && cvalid {
                                     progress_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
-                                    let processed = progress_counter.load(Ordering::SeqCst);
-                                    progress_cb(processed, total_bytes, 0);
                                 } else {
                                     // Retry download
                                     let mut dl = AsyncDownloader::new(
@@ -845,7 +926,14 @@ impl Kuro for Game {
                                     )
                                     .await
                                     .unwrap();
-                                    let dlf = dl.download(staging_dir.clone(), |_, _, _| {}).await;
+                                    let net_t = net_tracker.clone();
+                                    let disk_t = disk_tracker.clone();
+                                    let dlf = dl
+                                        .download(staging_dir.clone(), move |_, _, ns, ds| {
+                                            net_t.add_bytes(ns);
+                                            disk_t.add_bytes(ds);
+                                        })
+                                        .await;
                                     let cvalid = if is_fast {
                                         staging_dir.metadata().unwrap().len() == chunk_task.size
                                     } else {
@@ -859,8 +947,6 @@ impl Kuro for Game {
                                     if dlf.is_ok() && cvalid {
                                         progress_counter
                                             .fetch_add(chunk_task.size, Ordering::SeqCst);
-                                        let processed = progress_counter.load(Ordering::SeqCst);
-                                        progress_cb(processed, total_bytes, 0);
                                     } else {
                                         // Retry 2nd time
                                         let mut dl = AsyncDownloader::new(
@@ -869,8 +955,14 @@ impl Kuro for Game {
                                         )
                                         .await
                                         .unwrap();
-                                        let dlf =
-                                            dl.download(staging_dir.clone(), |_, _, _| {}).await;
+                                        let net_t = net_tracker.clone();
+                                        let disk_t = disk_tracker.clone();
+                                        let dlf = dl
+                                            .download(staging_dir.clone(), move |_, _, ns, ds| {
+                                                net_t.add_bytes(ns);
+                                                disk_t.add_bytes(ds);
+                                            })
+                                            .await;
                                         let cvalid = if is_fast {
                                             staging_dir.metadata().unwrap().len() == chunk_task.size
                                         } else {
@@ -884,8 +976,6 @@ impl Kuro for Game {
                                         if dlf.is_ok() && cvalid {
                                             progress_counter
                                                 .fetch_add(chunk_task.size, Ordering::SeqCst);
-                                            let processed = progress_counter.load(Ordering::SeqCst);
-                                            progress_cb(processed, total_bytes, 0);
                                         } else {
                                             eprintln!(
                                                 "Failed to validate repair file {} after 2 retries!",
@@ -908,8 +998,9 @@ impl Kuro for Game {
             for handle in handles {
                 let _ = handle.await;
             }
+            monitor_handle.abort();
             // All files are complete make sure we report done just in case
-            progress(total_bytes, total_bytes, 0);
+            progress(total_bytes, total_bytes, 0, 0);
             if p.exists() {
                 tokio::fs::remove_dir_all(p.as_path()).await.unwrap();
             }
@@ -927,7 +1018,7 @@ impl Kuro for Game {
         progress: F,
     ) -> bool
     where
-        F: Fn(u64, u64, u64) + Send + Sync + 'static,
+        F: Fn(u64, u64, u64, u64) + Send + Sync + 'static,
     {
         if manifest.is_empty()
             || game_path.is_empty()
@@ -954,7 +1045,7 @@ impl Kuro for Game {
             .await
             .unwrap();
         let dll = dl
-            .download(p.clone().join("manifest.json"), |_, _, _| {})
+            .download(p.clone().join("manifest.json"), |_, _, _, _| {})
             .await;
 
         if dll.is_ok() {
@@ -975,7 +1066,26 @@ impl Kuro for Game {
 
             let total_bytes: u64 = files.resource.iter().map(|f| f.size).sum();
             let progress_counter = Arc::new(AtomicU64::new(0));
+            let net_tracker = Arc::new(SpeedTracker::new());
+            let disk_tracker = Arc::new(SpeedTracker::new());
             let progress = Arc::new(progress);
+
+            // Monitor task for real-time progress/speed reporting using EMA smoothing
+            let monitor_handle = tokio::spawn({
+                let progress_counter = progress_counter.clone();
+                let net_tracker = net_tracker.clone();
+                let disk_tracker = disk_tracker.clone();
+                let progress = progress.clone();
+                async move {
+                    loop {
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        let current = progress_counter.load(Ordering::SeqCst);
+                        let net_speed = net_tracker.update();
+                        let disk_speed = disk_tracker.update();
+                        progress(current, total_bytes, net_speed, disk_speed);
+                    }
+                }
+            });
 
             // Start of download code
             let injector = Arc::new(Injector::<KuroResource>::new());
@@ -1002,6 +1112,8 @@ impl Kuro for Game {
 
                 let stealers = stealers.clone();
                 let progress_counter = progress_counter.clone();
+                let net_tracker = net_tracker.clone();
+                let disk_tracker = disk_tracker.clone();
                 let progress_cb = progress.clone();
                 let chunk_res = base_resources.clone();
                 let chunks_zip = base_zip.clone();
@@ -1029,7 +1141,9 @@ impl Kuro for Game {
 
                         let ct = tokio::spawn({
                             let progress_counter = progress_counter.clone();
-                            let progress_cb = progress_cb.clone();
+                            let net_tracker = net_tracker.clone();
+                            let disk_tracker = disk_tracker.clone();
+                            let _progress_cb = progress_cb.clone();
                             let chunk_res = chunk_res.clone();
                             let chunks_zip = chunks_zip.clone();
                             let staging = staging.clone();
@@ -1044,8 +1158,6 @@ impl Kuro for Game {
 
                                 if staging_dir.exists() && cvalid {
                                     progress_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
-                                    let processed = progress_counter.load(Ordering::SeqCst);
-                                    progress_cb(processed, total_bytes, 0);
                                     return;
                                 }
 
@@ -1065,7 +1177,14 @@ impl Kuro for Game {
                                 )
                                 .await
                                 .unwrap();
-                                let dlf = dl.download(staging_dir.clone(), |_, _, _| {}).await;
+                                let net_t = net_tracker.clone();
+                                let disk_t = disk_tracker.clone();
+                                let dlf = dl
+                                    .download(staging_dir.clone(), move |_, _, ns, ds| {
+                                        net_t.add_bytes(ns);
+                                        disk_t.add_bytes(ds);
+                                    })
+                                    .await;
                                 let cvalid = validate_checksum(
                                     staging_dir.as_path(),
                                     chunk_task.md5.to_ascii_lowercase(),
@@ -1074,8 +1193,6 @@ impl Kuro for Game {
 
                                 if dlf.is_ok() && cvalid {
                                     progress_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
-                                    let processed = progress_counter.load(Ordering::SeqCst);
-                                    progress_cb(processed, total_bytes, 0);
                                 } else {
                                     // Retry download
                                     let mut dl = AsyncDownloader::new(
@@ -1084,7 +1201,14 @@ impl Kuro for Game {
                                     )
                                     .await
                                     .unwrap();
-                                    let dlf = dl.download(staging_dir.clone(), |_, _, _| {}).await;
+                                    let net_t = net_tracker.clone();
+                                    let disk_t = disk_tracker.clone();
+                                    let dlf = dl
+                                        .download(staging_dir.clone(), move |_, _, ns, ds| {
+                                            net_t.add_bytes(ns);
+                                            disk_t.add_bytes(ds);
+                                        })
+                                        .await;
                                     let cvalid = validate_checksum(
                                         staging_dir.as_path(),
                                         chunk_task.md5.to_ascii_lowercase(),
@@ -1094,8 +1218,6 @@ impl Kuro for Game {
                                     if dlf.is_ok() && cvalid {
                                         progress_counter
                                             .fetch_add(chunk_task.size, Ordering::SeqCst);
-                                        let processed = progress_counter.load(Ordering::SeqCst);
-                                        progress_cb(processed, total_bytes, 0);
                                     } else {
                                         // Retry again
                                         let mut dl = AsyncDownloader::new(
@@ -1104,8 +1226,14 @@ impl Kuro for Game {
                                         )
                                         .await
                                         .unwrap();
-                                        let dlf =
-                                            dl.download(staging_dir.clone(), |_, _, _| {}).await;
+                                        let net_t = net_tracker.clone();
+                                        let disk_t = disk_tracker.clone();
+                                        let dlf = dl
+                                            .download(staging_dir.clone(), move |_, _, ns, ds| {
+                                                net_t.add_bytes(ns);
+                                                disk_t.add_bytes(ds);
+                                            })
+                                            .await;
                                         let cvalid = validate_checksum(
                                             staging_dir.as_path(),
                                             chunk_task.md5.to_ascii_lowercase(),
@@ -1115,8 +1243,6 @@ impl Kuro for Game {
                                         if dlf.is_ok() && cvalid {
                                             progress_counter
                                                 .fetch_add(chunk_task.size, Ordering::SeqCst);
-                                            let processed = progress_counter.load(Ordering::SeqCst);
-                                            progress_cb(processed, total_bytes, 0);
                                         } else {
                                             eprintln!(
                                                 "Failed to validate preload file {} after 2 retries!",
@@ -1139,8 +1265,9 @@ impl Kuro for Game {
             for handle in handles {
                 let _ = handle.await;
             }
+            monitor_handle.abort();
             // All files are complete make sure we report done just in case
-            progress(total_bytes, total_bytes, 0);
+            progress(total_bytes, total_bytes, 0, 0);
             true
         } else {
             false

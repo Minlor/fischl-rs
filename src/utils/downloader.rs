@@ -49,7 +49,7 @@ impl SpeedTracker {
     /// Update the EMA speed calculation. Call this periodically (e.g., every 200ms).
     /// Returns the smoothed speed in bytes/second.
     pub fn update(&self) -> u64 {
-        const EMA_ALPHA: f64 = 0.25; // Balanced smoothing factor
+        const EMA_ALPHA: f64 = 0.5; // More responsive at slower update frequency
         const MIN_UPDATE_MS: u128 = 150; // Minimum time between updates
 
         let now = Instant::now();
@@ -314,7 +314,7 @@ impl AsyncDownloader {
     pub async fn download(
         &mut self,
         path: impl Into<PathBuf>,
-        mut progress: impl FnMut(u64, u64, u64) + Send + Sync + 'static,
+        mut progress: impl FnMut(u64, u64, u64, u64) + Send + Sync + 'static,
     ) -> Result<(), DownloadingError> {
         let path = path.into();
         let mut downloaded = 0;
@@ -415,6 +415,7 @@ impl AsyncDownloader {
                             self.length.unwrap_or(downloaded as u64),
                             self.length.unwrap_or(downloaded as u64),
                             0,
+                            0,
                         );
                         return Ok(());
                     }
@@ -437,14 +438,16 @@ impl AsyncDownloader {
                         self.length.unwrap_or(downloaded as u64),
                         self.length.unwrap_or(downloaded as u64),
                         0,
+                        0,
                     );
                     return Ok(());
                 }
 
                 let mut stream = request.bytes_stream();
-                let mut last_speed_update = Instant::now();
-                let mut last_downloaded_bytes = downloaded;
-                let mut current_speed = 0;
+                let net_tracker = SpeedTracker::new();
+                let disk_tracker = SpeedTracker::new();
+                let mut last_update = Instant::now();
+                let mut written_bytes = downloaded as u64;
 
                 while let Some(chunk) = stream.next().await {
                     if let Some(token) = &self.cancel_token {
@@ -453,6 +456,7 @@ impl AsyncDownloader {
                         }
                     }
                     let data = chunk?;
+                    net_tracker.add_bytes(data.len() as u64);
 
                     for part in data.chunks(RATE_LIMIT_SLICE_SIZE) {
                         if let Some(token) = &self.cancel_token {
@@ -465,23 +469,21 @@ impl AsyncDownloader {
                             .consume(part.len() as u64)
                             .await;
                         file.write_all(part).await.unwrap();
-                        downloaded += part.len();
+                        written_bytes += part.len() as u64;
+                        disk_tracker.add_bytes(part.len() as u64);
 
                         let now = Instant::now();
-                        let elapsed = now.duration_since(last_speed_update);
-                        if elapsed.as_millis() >= 50 {
-                            current_speed = ((downloaded - last_downloaded_bytes) as u64
-                                * 1_000_000)
-                                / elapsed.as_micros() as u64;
-                            last_speed_update = now;
-                            last_downloaded_bytes = downloaded;
+                        if now.duration_since(last_update).as_millis() >= 500 {
+                            let net_speed = net_tracker.update();
+                            let disk_speed = disk_tracker.update();
+                            progress(
+                                written_bytes,
+                                self.length.unwrap_or(written_bytes),
+                                net_speed,
+                                disk_speed,
+                            );
+                            last_update = now;
                         }
-
-                        progress(
-                            downloaded as u64,
-                            self.length.unwrap_or(downloaded as u64),
-                            current_speed,
-                        );
                     }
                 }
 
