@@ -107,24 +107,31 @@ impl Default for SpeedTracker {
 }
 
 #[derive(Debug)]
-struct DownloadRateLimiterState {
-    window_start: tokio::time::Instant,
-    used_in_window: u64,
+struct TokenBucketState {
+    tokens: u64,
+    last_refill: tokio::time::Instant,
 }
 
+/// Token bucket rate limiter for smooth bandwidth control.
+/// Uses continuous replenishment (20x/sec) instead of fixed windows
+/// to eliminate burst-then-wait speed spikes.
 #[derive(Debug)]
 pub struct DownloadRateLimiter {
     limit_bps: AtomicU64,
-    state: Mutex<DownloadRateLimiterState>,
+    state: Mutex<TokenBucketState>,
 }
 
 impl DownloadRateLimiter {
+    /// Replenishment interval: 25ms (40 times per second) for smoother flow
+    const REFILL_INTERVAL_MS: u64 = 25;
+    const REFILLS_PER_SECOND: u64 = 1000 / Self::REFILL_INTERVAL_MS; // 40
+
     fn new() -> Self {
         Self {
             limit_bps: AtomicU64::new(0),
-            state: Mutex::new(DownloadRateLimiterState {
-                window_start: tokio::time::Instant::now(),
-                used_in_window: 0,
+            state: Mutex::new(TokenBucketState {
+                tokens: 0,
+                last_refill: tokio::time::Instant::now(),
             }),
         }
     }
@@ -139,37 +146,48 @@ impl DownloadRateLimiter {
             return;
         }
 
-        // Fixed-window limiter to keep the "instantaneous" rate close to the configured cap.
-        // This avoids long sleep / burst patterns that can show up as spikes in Task Manager.
-        const WINDOW_MS: u64 = 100;
-        let window = Duration::from_millis(WINDOW_MS);
-
-        // Integer budget for this window; at least 1 byte to avoid deadlock at tiny limits.
-        let window_budget = ((limit_bps as u128 * WINDOW_MS as u128) / 1000u128).max(1) as u64;
+        // Tokens to add per refill interval (limit_bps / refills_per_second)
+        let tokens_per_refill = (limit_bps / Self::REFILLS_PER_SECOND).max(1);
+        // Maximum bucket capacity = 100ms worth of tokens (prevents large bursts)
+        // This is critical: limiting to 100ms prevents burst accumulation
+        let max_tokens = (limit_bps / 10).max(tokens_per_refill);
+        let refill_interval = Duration::from_millis(Self::REFILL_INTERVAL_MS);
 
         while bytes > 0 {
             let now = tokio::time::Instant::now();
-            let mut sleep_until: Option<tokio::time::Instant> = None;
+            let mut sleep_duration: Option<Duration> = None;
             let mut allowed_now = 0u64;
 
             {
                 let mut state = self.state.lock().await;
-                if now.duration_since(state.window_start) >= window {
-                    state.window_start = now;
-                    state.used_in_window = 0;
+
+                // Calculate how many refill intervals have passed
+                let elapsed = now.duration_since(state.last_refill);
+                let intervals_passed = elapsed.as_millis() as u64 / Self::REFILL_INTERVAL_MS;
+
+                if intervals_passed > 0 {
+                    // Add tokens for each interval that passed, but cap to prevent burst
+                    let tokens_to_add = intervals_passed.saturating_mul(tokens_per_refill);
+                    state.tokens = state.tokens.saturating_add(tokens_to_add).min(max_tokens);
+                    // Advance last_refill by whole intervals only
+                    state.last_refill +=
+                        Duration::from_millis(intervals_passed * Self::REFILL_INTERVAL_MS);
                 }
 
-                let remaining = window_budget.saturating_sub(state.used_in_window);
-                if remaining == 0 {
-                    sleep_until = Some(state.window_start + window);
+                if state.tokens == 0 {
+                    // No tokens available, wait until next refill
+                    sleep_duration = Some(refill_interval.saturating_sub(elapsed));
                 } else {
-                    allowed_now = remaining.min(bytes);
-                    state.used_in_window = state.used_in_window.saturating_add(allowed_now);
+                    // Consume available tokens
+                    allowed_now = state.tokens.min(bytes);
+                    state.tokens = state.tokens.saturating_sub(allowed_now);
                 }
             }
 
-            if let Some(until) = sleep_until {
-                tokio::time::sleep_until(until).await;
+            if let Some(duration) = sleep_duration {
+                if duration > Duration::ZERO {
+                    tokio::time::sleep(duration).await;
+                }
                 continue;
             }
 
@@ -182,6 +200,20 @@ static GLOBAL_DOWNLOAD_RATE_LIMITER: OnceLock<DownloadRateLimiter> = OnceLock::n
 
 fn global_download_rate_limiter() -> &'static DownloadRateLimiter {
     GLOBAL_DOWNLOAD_RATE_LIMITER.get_or_init(DownloadRateLimiter::new)
+}
+
+/// Global semaphore to limit concurrent active downloads.
+/// This is critical for rate limiting to work effectively - with too many
+/// concurrent TCP streams, OS buffers fill faster than we can rate-limit.
+static GLOBAL_DOWNLOAD_SEMAPHORE: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
+
+/// Maximum number of concurrent download streams when rate limiting is active.
+/// Keeping this low ensures rate limiting can control actual throughput.
+const MAX_CONCURRENT_DOWNLOADS_LIMITED: usize = 12;
+
+fn global_download_semaphore() -> &'static tokio::sync::Semaphore {
+    GLOBAL_DOWNLOAD_SEMAPHORE
+        .get_or_init(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_DOWNLOADS_LIMITED))
 }
 
 /// Sets the global download speed limit in KiB/s. Set to 0 for unlimited.
@@ -421,6 +453,18 @@ impl AsyncDownloader {
                     }
                 }
 
+                // Acquire semaphore permit BEFORE making GET request if rate limiting is active
+                // This is critical - TCP buffering starts when the connection is made
+                let limit_active = global_download_rate_limiter()
+                    .limit_bps
+                    .load(AtomicOrdering::Relaxed)
+                    > 0;
+                let _permit = if limit_active {
+                    Some(global_download_semaphore().acquire().await.unwrap())
+                } else {
+                    None
+                };
+
                 let request = self
                     .client
                     .get(&self.uri)
@@ -456,8 +500,9 @@ impl AsyncDownloader {
                         }
                     }
                     let data = chunk?;
-                    net_tracker.add_bytes(data.len() as u64);
 
+                    // Rate limit BEFORE processing data to back-pressure the TCP stream
+                    // This is the key to actually limiting network speed
                     for part in data.chunks(RATE_LIMIT_SLICE_SIZE) {
                         if let Some(token) = &self.cancel_token {
                             if token.load(Ordering::Relaxed) {
@@ -465,9 +510,13 @@ impl AsyncDownloader {
                             }
                         }
 
+                        // Wait for rate limit tokens BEFORE allowing more data through
                         global_download_rate_limiter()
                             .consume(part.len() as u64)
                             .await;
+
+                        // Now track and write the data
+                        net_tracker.add_bytes(part.len() as u64);
                         file.write_all(part).await.unwrap();
                         written_bytes += part.len() as u64;
                         disk_tracker.add_bytes(part.len() as u64);
