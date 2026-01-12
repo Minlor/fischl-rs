@@ -49,8 +49,8 @@ impl SpeedTracker {
     /// Update the EMA speed calculation. Call this periodically (e.g., every 200ms).
     /// Returns the smoothed speed in bytes/second.
     pub fn update(&self) -> u64 {
-        const EMA_ALPHA: f64 = 0.5; // More responsive at slower update frequency
-        const MIN_UPDATE_MS: u128 = 150; // Minimum time between updates
+        const EMA_ALPHA: f64 = 0.25; // Lower alpha = heavier smoothing, less responsive to spikes
+        const MIN_UPDATE_MS: u128 = 300; // Longer interval between updates for stability
 
         let now = Instant::now();
         let mut last_update = self.last_update.lock().unwrap();
@@ -148,9 +148,9 @@ impl DownloadRateLimiter {
 
         // Tokens to add per refill interval (limit_bps / refills_per_second)
         let tokens_per_refill = (limit_bps / Self::REFILLS_PER_SECOND).max(1);
-        // Maximum bucket capacity = 100ms worth of tokens (prevents large bursts)
-        // This is critical: limiting to 100ms prevents burst accumulation
-        let max_tokens = (limit_bps / 10).max(tokens_per_refill);
+        // Maximum bucket capacity = 50ms worth of tokens (prevents large bursts)
+        // Lower capacity = smoother throughput but slightly less peak utilization
+        let max_tokens = (limit_bps / 20).max(tokens_per_refill);
         let refill_interval = Duration::from_millis(Self::REFILL_INTERVAL_MS);
 
         while bytes > 0 {
