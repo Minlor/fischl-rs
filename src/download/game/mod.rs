@@ -16,6 +16,7 @@ pub trait Zipped {
         game_path: String,
         progress: impl Fn(u64, u64, u64, u64) + Send + Sync + 'static,
         cancel_token: Option<Arc<AtomicBool>>,
+        verified_files: Option<Arc<std::sync::Mutex<std::collections::HashSet<String>>>>,
     ) -> bool;
     async fn patch(
         url: String,
@@ -38,6 +39,7 @@ pub trait Kuro {
         game_path: String,
         progress: F,
         cancel_token: Option<Arc<AtomicBool>>,
+        verified_files: Option<Arc<std::sync::Mutex<std::collections::HashSet<String>>>>,
     ) -> bool
     where
         F: Fn(u64, u64, u64, u64) + Send + Sync + 'static;
@@ -79,6 +81,7 @@ pub trait Sophon {
         game_path: String,
         progress: F,
         cancel_token: Option<Arc<AtomicBool>>,
+        verified_files: Option<Arc<std::sync::Mutex<std::collections::HashSet<String>>>>,
     ) -> bool
     where
         F: Fn(u64, u64, u64, u64) + Send + Sync + 'static;

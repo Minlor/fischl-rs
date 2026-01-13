@@ -10,6 +10,7 @@ impl Zipped for Game {
         game_path: String,
         progress: impl Fn(u64, u64, u64, u64) + Send + Sync + 'static,
         cancel_token: Option<Arc<AtomicBool>>,
+        _verified_files: Option<Arc<std::sync::Mutex<std::collections::HashSet<String>>>>,
     ) -> bool {
         if urls.is_empty() || game_path.is_empty() {
             return false;

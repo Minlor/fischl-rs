@@ -22,6 +22,7 @@ impl Sophon for Game {
         game_path: String,
         progress: F,
         cancel_token: Option<Arc<AtomicBool>>,
+        verified_files: Option<Arc<std::sync::Mutex<std::collections::HashSet<String>>>>,
     ) -> bool
     where
         F: Fn(u64, u64, u64, u64) + Send + Sync + 'static,
@@ -145,7 +146,10 @@ impl Sophon for Game {
                     let staging_dir = staging.clone();
                     let chunk_base = chunk_base.clone();
                     let client = client.clone();
+                    let chunk_base = chunk_base.clone();
+                    let client = client.clone();
                     let cancel_token = cancel_token.clone();
+                    let verified_files = verified_files.clone();
 
                     let mut retry_tasks = Vec::new();
                     let handle = tokio::task::spawn(async move {
@@ -180,7 +184,9 @@ impl Sophon for Game {
                                 let staging_dir = staging_dir.clone();
                                 let chunk_base = chunk_base.clone();
                                 let client = client.clone();
+                                let client = client.clone();
                                 let cancel_token = cancel_token.clone();
+                                let verified_files = verified_files.clone();
                                 async move {
                                     if let Some(token) = &cancel_token {
                                         if token.load(Ordering::Relaxed) {
@@ -198,6 +204,7 @@ impl Sophon for Game {
                                         cancel_token.clone(),
                                         net_tracker.clone(),
                                         disk_tracker.clone(),
+                                        verified_files.clone(),
                                     )
                                     .await;
 
@@ -215,6 +222,7 @@ impl Sophon for Game {
                                         false,
                                         net_tracker.clone(),
                                         disk_tracker.clone(),
+                                        verified_files.clone(),
                                     )
                                     .await;
                                     drop(permit);
@@ -813,6 +821,7 @@ impl Sophon for Game {
                                         None,
                                         net_tracker.clone(),
                                         disk_tracker.clone(),
+                                        None,
                                     )
                                     .await;
 
@@ -830,6 +839,7 @@ impl Sophon for Game {
                                         is_fast,
                                         net_tracker.clone(),
                                         disk_tracker.clone(),
+                                        None,
                                     )
                                     .await;
                                     drop(permit);
@@ -1117,10 +1127,19 @@ async fn process_file_chunks(
     is_fast: bool,
     cancel_token: Option<Arc<AtomicBool>>,
     net_tracker: Arc<SpeedTracker>,
+
     disk_tracker: Arc<SpeedTracker>,
+    verified_files: Option<Arc<std::sync::Mutex<std::collections::HashSet<String>>>>,
 ) {
     if chunk_task.r#type == 64 {
         return;
+    }
+
+    if let Some(vf) = &verified_files {
+        let v = vf.lock().unwrap();
+        if v.contains(&chunk_task.name) {
+            return;
+        }
     }
 
     let fp = staging_dir.join(&chunk_task.name);
@@ -1412,10 +1431,23 @@ async fn validate_file<F>(
     is_fast: bool,
     net_tracker: Arc<SpeedTracker>,
     disk_tracker: Arc<SpeedTracker>,
+    verified_files: Option<Arc<std::sync::Mutex<std::collections::HashSet<String>>>>,
 ) where
     F: Fn(u64, u64, u64, u64) + Send + Sync + 'static,
 {
-    let valid = validate_checksum(fp.as_path(), chunk_task.md5.to_ascii_lowercase()).await;
+    let mut already_verified = false;
+    if let Some(vf) = &verified_files {
+        let v = vf.lock().unwrap();
+        if v.contains(&chunk_task.name) {
+            already_verified = true;
+        }
+    }
+
+    let valid = if already_verified {
+        true
+    } else {
+        validate_checksum(fp.as_path(), chunk_task.md5.to_ascii_lowercase()).await
+    };
     if !valid {
         if fp.exists() {
             if let Err(e) = tokio::fs::remove_file(&fp).await {
@@ -1436,6 +1468,7 @@ async fn validate_file<F>(
             None,
             net_tracker.clone(),
             disk_tracker.clone(),
+            verified_files.clone(),
         )
         .await;
         let revalid = validate_checksum(fp.as_path(), chunk_task.md5.to_ascii_lowercase()).await;
@@ -1459,6 +1492,7 @@ async fn validate_file<F>(
                 None,
                 net_tracker.clone(),
                 disk_tracker.clone(),
+                verified_files.clone(),
             )
             .await;
             let revalid2 =
@@ -1483,6 +1517,7 @@ async fn validate_file<F>(
                     None,
                     net_tracker.clone(),
                     disk_tracker.clone(),
+                    verified_files.clone(),
                 )
                 .await;
                 let revalid3 =
@@ -1538,6 +1573,12 @@ async fn validate_file<F>(
             }
         }
     } else {
+        if valid && !already_verified {
+            if let Some(vf) = &verified_files {
+                let mut v = vf.lock().unwrap();
+                v.insert(chunk_task.name.clone());
+            }
+        }
         let _processed = progress_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
         for c in &chunk_task.chunks {
             let chunk_path = chunks_dir.join(&c.chunk_name);

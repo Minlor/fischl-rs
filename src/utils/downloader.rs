@@ -140,10 +140,10 @@ impl DownloadRateLimiter {
         self.limit_bps.store(limit_bps, AtomicOrdering::Relaxed);
     }
 
-    async fn consume(&self, mut bytes: u64) {
+    async fn consume(&self, mut bytes: u64, cancel_token: Option<&AtomicBool>) -> bool {
         let limit_bps = self.limit_bps.load(AtomicOrdering::Relaxed);
         if limit_bps == 0 || bytes == 0 {
-            return;
+            return true;
         }
 
         // Tokens to add per refill interval (limit_bps / refills_per_second)
@@ -154,6 +154,13 @@ impl DownloadRateLimiter {
         let refill_interval = Duration::from_millis(Self::REFILL_INTERVAL_MS);
 
         while bytes > 0 {
+            // Check cancellation token
+            if let Some(token) = cancel_token {
+                if token.load(AtomicOrdering::Relaxed) {
+                    return false;
+                }
+            }
+
             let now = tokio::time::Instant::now();
             let mut sleep_duration: Option<Duration> = None;
             let mut allowed_now = 0u64;
@@ -193,6 +200,7 @@ impl DownloadRateLimiter {
 
             bytes = bytes.saturating_sub(allowed_now);
         }
+        true
     }
 }
 
@@ -460,7 +468,22 @@ impl AsyncDownloader {
                     .load(AtomicOrdering::Relaxed)
                     > 0;
                 let _permit = if limit_active {
-                    Some(global_download_semaphore().acquire().await.unwrap())
+                    let semaphore = global_download_semaphore();
+                    loop {
+                        if let Some(token) = &self.cancel_token {
+                            if token.load(Ordering::Relaxed) {
+                                return Err(DownloadingError::Cancelled);
+                            }
+                        }
+                        // Use timeout to check cancellation periodically while waiting
+                        // This prevents hanging if the user pauses while we are blocked on the semaphore
+                        if let Ok(permit) =
+                            tokio::time::timeout(Duration::from_millis(100), semaphore.acquire())
+                                .await
+                        {
+                            break Some(permit.unwrap());
+                        }
+                    }
                 } else {
                     None
                 };
@@ -511,9 +534,13 @@ impl AsyncDownloader {
                         }
 
                         // Wait for rate limit tokens BEFORE allowing more data through
-                        global_download_rate_limiter()
-                            .consume(part.len() as u64)
-                            .await;
+                        // Wait for rate limit tokens BEFORE allowing more data through
+                        if !global_download_rate_limiter()
+                            .consume(part.len() as u64, self.cancel_token.as_deref())
+                            .await
+                        {
+                            return Err(DownloadingError::Cancelled);
+                        }
 
                         // Now track and write the data
                         net_tracker.add_bytes(part.len() as u64);

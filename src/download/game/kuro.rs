@@ -19,6 +19,7 @@ impl Kuro for Game {
         game_path: String,
         progress: F,
         cancel_token: Option<Arc<AtomicBool>>,
+        verified_files: Option<Arc<std::sync::Mutex<std::collections::HashSet<String>>>>,
     ) -> bool
     where
         F: Fn(u64, u64, u64, u64) + Send + Sync + 'static,
@@ -115,6 +116,7 @@ impl Kuro for Game {
                 let staging = staging.clone();
                 let client = client.clone();
                 let cancel_token = cancel_token.clone();
+                let verified_files = verified_files.clone();
 
                 let mut retry_tasks = Vec::new();
                 let handle = tokio::task::spawn(async move {
@@ -147,7 +149,9 @@ impl Kuro for Game {
                             let chunk_base = chunk_base.clone();
                             let staging = staging.clone();
                             let client = client.clone();
+                            let client = client.clone();
                             let cancel_token = cancel_token.clone();
+                            let verified_files = verified_files.clone();
                             async move {
                                 if let Some(token) = &cancel_token {
                                     if token.load(Ordering::Relaxed) {
@@ -156,13 +160,32 @@ impl Kuro for Game {
                                     }
                                 }
                                 let staging_dir = staging.join(chunk_task.dest.clone());
-                                let cvalid = validate_checksum(
-                                    staging_dir.as_path(),
-                                    chunk_task.md5.to_ascii_lowercase(),
-                                )
-                                .await;
+
+                                let mut already_verified = false;
+                                if let Some(vf) = &verified_files {
+                                    let v = vf.lock().unwrap();
+                                    if v.contains(&chunk_task.dest) {
+                                        already_verified = true;
+                                    }
+                                }
+
+                                let cvalid = if already_verified {
+                                    true
+                                } else {
+                                    validate_checksum(
+                                        staging_dir.as_path(),
+                                        chunk_task.md5.to_ascii_lowercase(),
+                                    )
+                                    .await
+                                };
 
                                 if staging_dir.exists() && cvalid {
+                                    if !already_verified {
+                                        if let Some(vf) = &verified_files {
+                                            let mut v = vf.lock().unwrap();
+                                            v.insert(chunk_task.dest.clone());
+                                        }
+                                    }
                                     progress_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
                                     return;
                                 }
@@ -208,6 +231,12 @@ impl Kuro for Game {
                                 .await;
 
                                 if dlf.is_ok() && cvalid {
+                                    if !already_verified {
+                                        if let Some(vf) = &verified_files {
+                                            let mut v = vf.lock().unwrap();
+                                            v.insert(chunk_task.dest.clone());
+                                        }
+                                    }
                                     progress_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
                                 } else {
                                     // Retry download
