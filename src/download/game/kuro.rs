@@ -347,6 +347,13 @@ impl Kuro for Game {
                 let _ = handle.await;
             }
 
+            if let Some(token) = &cancel_token {
+                if token.load(Ordering::Relaxed) {
+                    monitor_handle.abort();
+                    return false;
+                }
+            }
+
             monitor_handle.abort();
             // All files are complete make sure we report done just in case
             progress(total_bytes, total_bytes, 0, 0);
