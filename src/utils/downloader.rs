@@ -534,7 +534,6 @@ impl AsyncDownloader {
                         }
 
                         // Wait for rate limit tokens BEFORE allowing more data through
-                        // Wait for rate limit tokens BEFORE allowing more data through
                         if !global_download_rate_limiter()
                             .consume(part.len() as u64, self.cancel_token.as_deref())
                             .await
@@ -562,6 +561,17 @@ impl AsyncDownloader {
                         }
                     }
                 }
+
+                // Always emit a final progress callback to ensure all bytes are reported
+                // This is critical for small/fast downloads where the 500ms callback may not fire
+                let net_speed = net_tracker.update();
+                let disk_speed = disk_tracker.update();
+                progress(
+                    written_bytes,
+                    self.length.unwrap_or(written_bytes),
+                    net_speed,
+                    disk_speed,
+                );
 
                 if let Err(err) = file.flush().await {
                     return Err(DownloadingError::OutputFileError(path, err.to_string()));
