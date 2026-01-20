@@ -10,7 +10,7 @@ use crate::utils::{extract_archive, get_full_extension};
 
 #[cfg(feature = "compat")]
 impl Compat {
-    pub async fn download_runner(url: String, dest: String, extract: bool, progress: impl Fn(u64, u64) + Send + Sync + 'static) -> bool {
+    pub async fn download_runner(url: String, dest: String, extract: bool, progress: impl FnMut(u64, u64, u64, u64) + Send + Sync + 'static) -> bool {
         let d = Path::new(&dest);
         if d.exists() {
             let c = AsyncDownloader::setup_client().await;
