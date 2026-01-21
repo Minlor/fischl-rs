@@ -175,6 +175,25 @@ pub fn prettify_bytes(bytes: u64) -> String {
     }
 }
 
+/// Check if a process is currently running by name.
+/// Uses sysinfo to detect processes. Works on Windows, Linux, and within Flatpak
+/// (for processes spawned as children of the app).
+pub fn is_process_running(process_name: &str) -> bool {
+    let mut sys = sysinfo::System::new_all();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    let pns = process_name.split('.').collect::<Vec<&str>>();
+    let pn = pns.first().unwrap_or(&process_name);
+    sys.processes().values().any(|process| {
+        if let Some(apn) = process.name().to_str() {
+            let apns = apn.split('.').collect::<Vec<&str>>();
+            if let Some(apnn) = apns.first() {
+                return apnn.contains(pn);
+            }
+        }
+        false
+    })
+}
+
 pub fn wait_for_process<F>(
     process_name: &str,
     delay_ms: u64,
@@ -184,17 +203,8 @@ pub fn wait_for_process<F>(
 where
     F: FnMut(bool) -> bool,
 {
-    let mut sys = sysinfo::System::new_all();
     for _ in 0..retries {
-        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-        let pns = process_name.split(".").collect::<Vec<&str>>();
-        let pn = pns.first().unwrap();
-        let found = sys.processes().values().any(|process| {
-            let apn = process.name().to_str().unwrap();
-            let apns = apn.split(".").collect::<Vec<&str>>();
-            let apnn = apns.first().unwrap();
-            apnn.contains(pn)
-        });
+        let found = is_process_running(process_name);
         if callback(found) {
             return found;
         }
