@@ -337,6 +337,15 @@ impl Kuro for Game {
                         }); // end task
                         retry_tasks.push(ct);
                     }
+                    // If cancelled, abort all spawned tasks instead of waiting
+                    if let Some(token) = &cancel_token {
+                        if token.load(Ordering::Relaxed) {
+                            for t in retry_tasks {
+                                t.abort();
+                            }
+                            return;
+                        }
+                    }
                     for t in retry_tasks {
                         let _ = t.await;
                     }

@@ -516,12 +516,25 @@ impl AsyncDownloader {
                 let mut last_update = Instant::now();
                 let mut written_bytes = downloaded as u64;
 
-                while let Some(chunk) = stream.next().await {
+                loop {
+                    // Check cancel token before waiting for data
                     if let Some(token) = &self.cancel_token {
                         if token.load(Ordering::Relaxed) {
                             return Err(DownloadingError::Cancelled);
                         }
                     }
+
+                    // Use timeout to avoid blocking indefinitely on slow connections
+                    // This allows responsive pause even when network is stalled
+                    let chunk_result =
+                        tokio::time::timeout(Duration::from_millis(250), stream.next()).await;
+
+                    let chunk = match chunk_result {
+                        Ok(Some(data)) => data,
+                        Ok(None) => break, // Stream ended normally
+                        Err(_) => continue, // Timeout - loop back to check cancel token
+                    };
+
                     let data = chunk?;
 
                     // Rate limit BEFORE processing data to back-pressure the TCP stream
