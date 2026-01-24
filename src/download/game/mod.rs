@@ -73,6 +73,11 @@ pub trait Kuro {
         F: Fn(u64, u64, u64, u64) + Send + Sync + 'static;
 }
 
+/// Progress callback parameters for Sophon:
+/// (download_current, download_total, install_current, install_total, net_speed, disk_speed, phase)
+/// - download_current/total: network bytes downloaded
+/// - install_current/total: bytes written to disk and validated
+/// - phase: 0=idle, 1=verifying, 2=downloading, 3=installing, 4=validating, 5=moving
 #[allow(async_fn_in_trait)]
 pub trait Sophon {
     async fn download<F>(
@@ -84,7 +89,7 @@ pub trait Sophon {
         verified_files: Option<Arc<std::sync::Mutex<std::collections::HashSet<String>>>>,
     ) -> bool
     where
-        F: Fn(u64, u64, u64, u64) + Send + Sync + 'static;
+        F: Fn(u64, u64, u64, u64, u64, u64, u8) + Send + Sync + 'static;
     async fn patch<F>(
         manifest: String,
         version: String,
@@ -95,7 +100,7 @@ pub trait Sophon {
         progress: F,
     ) -> bool
     where
-        F: Fn(u64, u64, u64, u64) + Send + Sync + 'static;
+        F: Fn(u64, u64, u64, u64, u64, u64, u8) + Send + Sync + 'static;
     async fn repair_game<F>(
         manifest: String,
         chunk_base: String,
@@ -104,7 +109,7 @@ pub trait Sophon {
         progress: F,
     ) -> bool
     where
-        F: Fn(u64, u64, u64, u64) + Send + Sync + 'static;
+        F: Fn(u64, u64, u64, u64, u64, u64, u8) + Send + Sync + 'static;
     async fn preload<F>(
         manifest: String,
         version: String,
@@ -113,5 +118,5 @@ pub trait Sophon {
         progress: F,
     ) -> bool
     where
-        F: Fn(u64, u64, u64, u64) + Send + Sync + 'static;
+        F: Fn(u64, u64, u64, u64, u64, u64, u8) + Send + Sync + 'static;
 }

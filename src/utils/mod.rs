@@ -74,27 +74,34 @@ pub(crate) fn get_codeberg_release(repository: String) -> Option<CodebergRelease
 }
 
 pub fn extract_archive(archive_path: String, extract_dest: String, move_subdirs: bool) -> bool {
+    extract_archive_with_progress(archive_path, extract_dest, move_subdirs, |_, _| {})
+}
+
+/// Extract an archive with progress reporting.
+/// The callback receives (current_bytes_extracted, total_bytes).
+pub fn extract_archive_with_progress<F>(
+    archive_path: String,
+    extract_dest: String,
+    move_subdirs: bool,
+    progress_callback: F,
+) -> bool
+where
+    F: Fn(u64, u64) + Send + 'static,
+{
     let src = Path::new(&archive_path);
     let dest = Path::new(&extract_dest);
 
     if !src.exists() {
         false
-    } else if !dest.exists() {
-        fs::create_dir_all(dest).unwrap();
-        actually_uncompress(
-            src.to_str().unwrap().to_string(),
-            dest.to_str().unwrap().to_string(),
-            move_subdirs,
-        );
-        if src.exists() {
-            fs::remove_file(src).unwrap();
-        }
-        true
     } else {
-        actually_uncompress(
+        if !dest.exists() {
+            fs::create_dir_all(dest).unwrap();
+        }
+        actually_uncompress_with_progress(
             src.to_str().unwrap().to_string(),
             dest.to_str().unwrap().to_string(),
             move_subdirs,
+            progress_callback,
         );
         if src.exists() {
             fs::remove_file(src).unwrap();
@@ -235,25 +242,97 @@ pub fn hpatchz<T: Into<PathBuf> + std::fmt::Debug>(
 }
 
 pub(crate) fn actually_uncompress(archive_path: String, dest: String, strip_head_path: bool) {
+    actually_uncompress_with_progress(archive_path, dest, strip_head_path, |_, _| {})
+}
+
+pub(crate) fn actually_uncompress_with_progress<F>(
+    archive_path: String,
+    dest: String,
+    strip_head_path: bool,
+    progress_callback: F,
+) where
+    F: Fn(u64, u64) + Send + 'static,
+{
     let ext = get_full_extension(archive_path.as_str()).unwrap();
     match ext {
         "zip" | "krzip" => {
-            let archive = zip::ZipArchive::new(fs::File::open(archive_path.clone()).unwrap());
-            if archive.is_ok() {
-                let mut a = archive.unwrap();
-                a.extract(dest).unwrap();
+            let file = match fs::File::open(&archive_path) {
+                Ok(f) => f,
+                Err(_) => return,
+            };
+            let mut archive = match zip::ZipArchive::new(file) {
+                Ok(a) => a,
+                Err(_) => return,
+            };
+
+            // Calculate total uncompressed size
+            let mut total_size: u64 = 0;
+            for i in 0..archive.len() {
+                if let Ok(f) = archive.by_index(i) {
+                    total_size += f.size();
+                }
+            }
+
+            let mut extracted: u64 = 0;
+            let dest_path = Path::new(&dest);
+
+            for i in 0..archive.len() {
+                let mut file = match archive.by_index(i) {
+                    Ok(f) => f,
+                    Err(_) => continue,
+                };
+
+                let outpath = match file.enclosed_name() {
+                    Some(path) => dest_path.join(path),
+                    None => continue,
+                };
+
+                if file.is_dir() {
+                    fs::create_dir_all(&outpath).unwrap_or(());
+                } else {
+                    if let Some(p) = outpath.parent() {
+                        if !p.exists() {
+                            fs::create_dir_all(p).unwrap_or(());
+                        }
+                    }
+                    let file_size = file.size();
+                    if let Ok(mut outfile) = fs::File::create(&outpath) {
+                        io::copy(&mut file, &mut outfile).unwrap_or(0);
+                    }
+                    extracted += file_size;
+                    progress_callback(extracted, total_size);
+                }
             }
         }
         "tar.gz" => {
-            let archive = fs::File::open(archive_path).unwrap();
-            let decompressor = flate2::read::GzDecoder::new(archive);
+            let file = fs::File::open(&archive_path).unwrap();
+            let file_size = file.metadata().map(|m| m.len()).unwrap_or(0);
+            // Estimate: compressed files are typically 3-5x smaller, use 4x as estimate
+            let estimated_total = file_size * 4;
+            let decompressor = flate2::read::GzDecoder::new(file);
             let mut archive = tar::Archive::new(decompressor);
 
             if !strip_head_path {
-                archive.unpack(&dest).unwrap_or(());
+                let dest_path = Path::new(&dest);
+                let mut extracted: u64 = 0;
+                for entry_res in archive.entries().unwrap() {
+                    let mut entry = match entry_res {
+                        Ok(e) => e,
+                        Err(_) => continue,
+                    };
+                    let entry_size = entry.size();
+                    let outpath = dest_path.join(entry.path().unwrap());
+                    if let Some(p) = outpath.parent() {
+                        fs::create_dir_all(p).unwrap_or(());
+                    }
+                    let _ = entry.unpack(&outpath);
+                    extracted += entry_size;
+                    progress_callback(extracted, estimated_total.max(extracted));
+                }
             } else {
                 let dest_path = Path::new(&dest);
                 let mut entries = archive.entries().unwrap();
+                let mut extracted: u64 = 0;
 
                 let first_entry = match entries.next() {
                     Some(e) => e.unwrap(),
@@ -272,6 +351,7 @@ pub(crate) fn actually_uncompress(archive_path: String, dest: String, strip_head
                 let all_entries = std::iter::once(Ok(first_entry)).chain(entries);
                 for entry_res in all_entries {
                     let mut entry = entry_res.unwrap();
+                    let entry_size = entry.size();
                     let orig = entry.path().unwrap().to_path_buf();
                     let orig = orig.strip_prefix(".").unwrap_or(&orig).to_path_buf();
                     let rel = match orig.strip_prefix(&top) {
@@ -286,20 +366,41 @@ pub(crate) fn actually_uncompress(archive_path: String, dest: String, strip_head
                     if let Some(parent) = out.parent() {
                         fs::create_dir_all(parent).unwrap();
                     }
-                    entry.unpack(&out).unwrap();
+                    let _ = entry.unpack(&out);
+                    extracted += entry_size;
+                    progress_callback(extracted, estimated_total.max(extracted));
                 }
             }
         }
         "tar.xz" => {
             let file = fs::File::open(&archive_path).unwrap();
+            let file_size = file.metadata().map(|m| m.len()).unwrap_or(0);
+            // XZ typically has higher compression ratio, use 6x as estimate
+            let estimated_total = file_size * 6;
             let decompressor = liblzma::read::XzDecoder::new(file);
             let mut archive = tar::Archive::new(decompressor);
 
             if !strip_head_path {
-                archive.unpack(&dest).unwrap_or(());
+                let dest_path = Path::new(&dest);
+                let mut extracted: u64 = 0;
+                for entry_res in archive.entries().unwrap() {
+                    let mut entry = match entry_res {
+                        Ok(e) => e,
+                        Err(_) => continue,
+                    };
+                    let entry_size = entry.size();
+                    let outpath = dest_path.join(entry.path().unwrap());
+                    if let Some(p) = outpath.parent() {
+                        fs::create_dir_all(p).unwrap_or(());
+                    }
+                    let _ = entry.unpack(&outpath);
+                    extracted += entry_size;
+                    progress_callback(extracted, estimated_total.max(extracted));
+                }
             } else {
                 let dest_path = Path::new(&dest);
                 let mut entries = archive.entries().unwrap();
+                let mut extracted: u64 = 0;
 
                 let first_entry = match entries.next() {
                     Some(e) => e.unwrap(),
@@ -318,6 +419,7 @@ pub(crate) fn actually_uncompress(archive_path: String, dest: String, strip_head
                 let all_entries = std::iter::once(Ok(first_entry)).chain(entries);
                 for entry_res in all_entries {
                     let mut entry = entry_res.unwrap();
+                    let entry_size = entry.size();
                     let orig = entry.path().unwrap().to_path_buf();
                     let orig = orig.strip_prefix(".").unwrap_or(&orig).to_path_buf();
                     let rel = match orig.strip_prefix(&top) {
@@ -333,11 +435,22 @@ pub(crate) fn actually_uncompress(archive_path: String, dest: String, strip_head
                         fs::create_dir_all(parent).unwrap();
                     }
                     entry.unpack(&out).unwrap();
+                    extracted += entry_size;
+                    progress_callback(extracted, estimated_total.max(extracted));
                 }
             }
         }
         "7z" => {
+            // 7z library doesn't support progress callbacks easily,
+            // so we just report start and end
+            let file = fs::File::open(&archive_path).unwrap_or_else(|_| panic!("Failed to open 7z archive"));
+            let file_size = file.metadata().map(|m| m.len()).unwrap_or(0);
+            let estimated_total = file_size * 5; // 7z typically has good compression
+            drop(file);
+
+            progress_callback(0, estimated_total);
             sevenz_rust2::decompress_file(archive_path.as_str(), dest.as_str()).unwrap_or(());
+            progress_callback(estimated_total, estimated_total);
         }
         &_ => {}
     }

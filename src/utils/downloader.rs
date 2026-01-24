@@ -91,6 +91,11 @@ impl SpeedTracker {
         self.ema_speed.load(AtomicOrdering::SeqCst)
     }
 
+    /// Get the total cumulative bytes tracked.
+    pub fn get_total(&self) -> u64 {
+        self.total_bytes.load(AtomicOrdering::SeqCst)
+    }
+
     /// Reset the tracker for reuse.
     pub fn reset(&self) {
         self.total_bytes.store(0, AtomicOrdering::SeqCst);
