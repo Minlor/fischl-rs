@@ -1,93 +1,41 @@
-use crate::utils::codeberg_structs::CodebergRelease;
-use crate::utils::github_structs::GithubRelease;
-use reqwest::header::USER_AGENT;
-use serde::{Deserialize, Serialize};
+use std::{fs, io};
 use std::io::{Error, Read, Write};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Command;
-use std::{fs, io};
+use reqwest::header::USER_AGENT;
+use serde::{Deserialize, Serialize};
+use crate::utils::github_structs::GithubRelease;
 
-pub(crate) mod codeberg_structs;
-pub mod downloader;
-pub mod free_space;
 pub(crate) mod github_structs;
 pub(crate) mod proto;
+pub mod downloader;
+pub mod free_space;
 pub use downloader::SpeedTracker;
 
 pub fn get_github_release(repository: String) -> Option<GithubRelease> {
     if repository.is_empty() {
         None
     } else {
-        let url = format!(
-            "https://api.github.com/repos/{}/releases/latest",
-            repository
-        );
+        let url = format!("https://api.github.com/repos/{}/releases/latest", repository);
         let client = reqwest::blocking::Client::new();
-        let response = client
-            .get(url)
-            .header(USER_AGENT, "lib/fischl-rs")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .header("Accept", "application/vnd.github+json")
-            .send();
+        let response = client.get(url).header(USER_AGENT, "lib/fischl-rs").header("X-GitHub-Api-Version", "2022-11-28").header("Accept", "application/vnd.github+json").send();
         match response {
             Ok(resp) => {
-                // Check for HTTP errors explicitly
-                if let Err(err) = resp.error_for_status_ref() {
-                    eprintln!("GitHub API returned error status: {:?}", err.status());
-                    return None;
-                }
+                if let Err(err) = resp.error_for_status_ref() { eprintln!("GitHub API returned error status: {:?}", err.status());return None; }
                 match resp.json::<GithubRelease>() {
                     Ok(github_release) => Some(github_release),
-                    Err(json_err) => {
-                        eprintln!("Failed to parse JSON: {}", json_err);
-                        None
-                    }
+                    Err(json_err) => { eprintln!("Failed to parse JSON: {}", json_err);None }
                 }
             }
-            Err(err) => {
-                eprintln!("Network or request failed: {}", err);
-                None
-            }
+            Err(err) => { eprintln!("Network or request failed: {}", err);None }
         }
     }
 }
 
-pub(crate) fn get_codeberg_release(repository: String) -> Option<CodebergRelease> {
-    if repository.is_empty() {
-        None
-    } else {
-        let url = format!(
-            "https://codeberg.org/api/v1/repos/{}/releases?draft=false&pre-release=false",
-            repository
-        );
-        let client = reqwest::blocking::Client::new();
-        let response = client.get(url).header(USER_AGENT, "lib/fischl-rs").send();
-        if response.is_ok() {
-            let list = response.unwrap();
-            let jsonified: CodebergRelease = list.json().unwrap();
-            Some(jsonified)
-        } else {
-            None
-        }
-    }
-}
-
-pub fn extract_archive(archive_path: String, extract_dest: String, move_subdirs: bool) -> bool {
-    extract_archive_with_progress(archive_path, extract_dest, move_subdirs, |_, _| {})
-}
-
-/// Extract an archive with progress reporting.
-/// The callback receives (current_bytes_extracted, total_bytes).
-pub fn extract_archive_with_progress<F>(
-    archive_path: String,
-    extract_dest: String,
-    move_subdirs: bool,
-    progress_callback: F,
-) -> bool
-where
-    F: Fn(u64, u64) + Send + 'static,
-{
+pub fn extract_archive_with_progress<F>(archive_path: String, extract_dest: String, move_subdirs: bool, progress_callback: F, ) -> bool
+    where
+    F: Fn(u64, u64) + Send + 'static, {
     let src = Path::new(&archive_path);
     let dest = Path::new(&extract_dest);
 
@@ -113,34 +61,22 @@ where
 pub fn assemble_multipart_archive(parts: Vec<String>, dest: String) -> bool {
     let first = parts.get(0).unwrap().strip_suffix(".001").unwrap();
     let fap = Path::new(&dest).join(first);
-    let mut out = match fs::File::create(&fap) {
-        Ok(f) => f,
-        Err(_) => return false,
-    };
-
+    let mut out = match fs::File::create(&fap) { Ok(f) => f, Err(_) => return false };
     for p in parts.clone() {
         let mut buf = Vec::new();
         let partp = Path::new(&dest).join(&p);
-
         let mut file = fs::File::open(&partp).unwrap();
         file.read_to_end(&mut buf).unwrap();
         out.write_all(&buf).unwrap();
         fs::remove_file(&partp).unwrap();
     }
-    if out.flush().is_err() {
-        return false;
-    }
+    if out.flush().is_err() { return false; }
     true
 }
 
-pub(crate) fn move_all<'a>(
-    src: &'a Path,
-    dst: &'a Path,
-) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>> {
+pub(crate) fn move_all<'a>(src: &'a Path, dst: &'a Path) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>> {
     Box::pin(async move {
-        if !dst.exists() {
-            tokio::fs::create_dir_all(dst).await?;
-        }
+        if !dst.exists() { tokio::fs::create_dir_all(dst).await?; }
 
         let mut dir = tokio::fs::read_dir(src).await?;
         while let Some(entry) = dir.next_entry().await? {
@@ -161,10 +97,12 @@ pub(crate) fn move_all<'a>(
 
 pub(crate) async fn validate_checksum(file: &Path, checksum: String) -> bool {
     match tokio::fs::File::open(file).await {
-        Ok(f) => match chksum_md5::async_chksum(f).await {
-            Ok(digest) => digest.to_hex_lowercase() == checksum.to_ascii_lowercase(),
-            Err(_) => false,
-        },
+        Ok(f) => {
+            match chksum_md5::async_chksum(f).await {
+                Ok(digest) => digest.to_hex_lowercase() == checksum.to_ascii_lowercase(),
+                Err(_) => false,
+            }
+        }
         Err(_) => false,
     }
 }
@@ -182,9 +120,6 @@ pub fn prettify_bytes(bytes: u64) -> String {
     }
 }
 
-/// Check if a process is currently running by name.
-/// Uses sysinfo to detect processes. Works on Windows, Linux, and within Flatpak
-/// (for processes spawned as children of the app).
 pub fn is_process_running(process_name: &str) -> bool {
     let mut sys = sysinfo::System::new_all();
     sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
@@ -220,50 +155,23 @@ where
     false
 }
 
-pub fn hpatchz<T: Into<PathBuf> + std::fmt::Debug>(
-    bin_path: String,
-    file: T,
-    patch: T,
-    output: T,
-) -> io::Result<()> {
-    let output = Command::new(bin_path.as_str())
-        .arg("-f")
-        .arg(file.into().as_os_str())
-        .arg(patch.into().as_os_str())
-        .arg(output.into().as_os_str())
-        .output()?;
+pub fn hpatchz<T: Into<PathBuf> + std::fmt::Debug>(bin_path: String, file: T, patch: T, output: T) -> io::Result<()> {
+    let output = Command::new(bin_path.as_str()).arg("-f").arg(file.into().as_os_str()).arg(patch.into().as_os_str()).arg(output.into().as_os_str()).output()?;
 
-    if String::from_utf8_lossy(output.stdout.as_slice()).contains("patch ok!") {
-        Ok(())
-    } else {
+    if String::from_utf8_lossy(output.stdout.as_slice()).contains("patch ok!") { Ok(()) } else {
         let err = String::from_utf8_lossy(&output.stderr);
         Err(Error::other(format!("Failed to apply hdiff patch: {err}")))
     }
 }
 
-pub(crate) fn actually_uncompress(archive_path: String, dest: String, strip_head_path: bool) {
-    actually_uncompress_with_progress(archive_path, dest, strip_head_path, |_, _| {})
-}
-
-pub(crate) fn actually_uncompress_with_progress<F>(
-    archive_path: String,
-    dest: String,
-    strip_head_path: bool,
-    progress_callback: F,
-) where
+pub(crate) fn actually_uncompress_with_progress<F>(archive_path: String, dest: String, strip_head_path: bool, progress_callback: F, ) where
     F: Fn(u64, u64) + Send + 'static,
-{
+    {
     let ext = get_full_extension(archive_path.as_str()).unwrap();
     match ext {
         "zip" | "krzip" => {
-            let file = match fs::File::open(&archive_path) {
-                Ok(f) => f,
-                Err(_) => return,
-            };
-            let mut archive = match zip::ZipArchive::new(file) {
-                Ok(a) => a,
-                Err(_) => return,
-            };
+            let file = match fs::File::open(&archive_path) { Ok(f) => f, Err(_) => return, };
+            let mut archive = match zip::ZipArchive::new(file) { Ok(a) => a, Err(_) => return, };
 
             // Calculate total uncompressed size
             let mut total_size: u64 = 0;
@@ -273,203 +181,81 @@ pub(crate) fn actually_uncompress_with_progress<F>(
                 }
             }
 
-            let mut extracted: u64 = 0;
-            let dest_path = Path::new(&dest);
+            // TODO UNFUCK THE PROGRESS CALLBACK
 
-            for i in 0..archive.len() {
-                let mut file = match archive.by_index(i) {
-                    Ok(f) => f,
-                    Err(_) => continue,
-                };
-
-                let outpath = match file.enclosed_name() {
-                    Some(path) => dest_path.join(path),
-                    None => continue,
-                };
-
-                if file.is_dir() {
-                    fs::create_dir_all(&outpath).unwrap_or(());
-                } else {
-                    if let Some(p) = outpath.parent() {
-                        if !p.exists() {
-                            fs::create_dir_all(p).unwrap_or(());
-                        }
-                    }
-                    let file_size = file.size();
-                    if let Ok(mut outfile) = fs::File::create(&outpath) {
-                        io::copy(&mut file, &mut outfile).unwrap_or(0);
-                    }
-                    extracted += file_size;
-                    progress_callback(extracted, total_size);
-                }
-            }
-        }
+        },
         "tar.gz" => {
-            let file = fs::File::open(&archive_path).unwrap();
-            let file_size = file.metadata().map(|m| m.len()).unwrap_or(0);
-            // Estimate: compressed files are typically 3-5x smaller, use 4x as estimate
-            let estimated_total = file_size * 4;
-            let decompressor = flate2::read::GzDecoder::new(file);
+            let archive = fs::File::open(archive_path).unwrap();
+            let decompressor = flate2::read::GzDecoder::new(archive);
             let mut archive = tar::Archive::new(decompressor);
 
             if !strip_head_path {
-                let dest_path = Path::new(&dest);
-                let mut extracted: u64 = 0;
-                for entry_res in archive.entries().unwrap() {
-                    let mut entry = match entry_res {
-                        Ok(e) => e,
-                        Err(_) => continue,
-                    };
-                    let entry_size = entry.size();
-                    let outpath = dest_path.join(entry.path().unwrap());
-                    if let Some(p) = outpath.parent() {
-                        fs::create_dir_all(p).unwrap_or(());
-                    }
-                    let _ = entry.unpack(&outpath);
-                    extracted += entry_size;
-                    progress_callback(extracted, estimated_total.max(extracted));
-                }
+                archive.unpack(&dest).unwrap_or(());
             } else {
                 let dest_path = Path::new(&dest);
                 let mut entries = archive.entries().unwrap();
-                let mut extracted: u64 = 0;
 
-                let first_entry = match entries.next() {
-                    Some(e) => e.unwrap(),
-                    None => return,
-                };
+                let first_entry = match entries.next() { Some(e) => e.unwrap(), None => return };
                 let first_path = first_entry.path().unwrap().to_path_buf();
-                let first_path = first_path
-                    .strip_prefix(".")
-                    .unwrap_or(&first_path)
-                    .to_path_buf();
-                let top = match first_path.components().next() {
-                    Some(c) => PathBuf::from(c.as_os_str()),
-                    None => PathBuf::new(),
-                };
+                let first_path = first_path.strip_prefix(".").unwrap_or(&first_path).to_path_buf();
+                let top = match first_path.components().next() { Some(c) => PathBuf::from(c.as_os_str()), None => PathBuf::new() };
 
                 let all_entries = std::iter::once(Ok(first_entry)).chain(entries);
                 for entry_res in all_entries {
                     let mut entry = entry_res.unwrap();
-                    let entry_size = entry.size();
                     let orig = entry.path().unwrap().to_path_buf();
                     let orig = orig.strip_prefix(".").unwrap_or(&orig).to_path_buf();
-                    let rel = match orig.strip_prefix(&top) {
-                        Ok(p) => p,
-                        Err(_) => orig.as_ref(),
-                    };
+                    let rel = match orig.strip_prefix(&top) { Ok(p) => p, Err(_) => orig.as_ref() };
 
-                    if rel.as_os_str().is_empty() {
-                        continue;
-                    }
+                    if rel.as_os_str().is_empty() { continue; }
                     let out = dest_path.to_path_buf().join(rel);
-                    if let Some(parent) = out.parent() {
-                        fs::create_dir_all(parent).unwrap();
-                    }
-                    let _ = entry.unpack(&out);
-                    extracted += entry_size;
-                    progress_callback(extracted, estimated_total.max(extracted));
+                    if let Some(parent) = out.parent() { fs::create_dir_all(parent).unwrap(); }
+                    entry.unpack(&out).unwrap();
                 }
             }
-        }
+        },
         "tar.xz" => {
             let file = fs::File::open(&archive_path).unwrap();
-            let file_size = file.metadata().map(|m| m.len()).unwrap_or(0);
-            // XZ typically has higher compression ratio, use 6x as estimate
-            let estimated_total = file_size * 6;
             let decompressor = liblzma::read::XzDecoder::new(file);
             let mut archive = tar::Archive::new(decompressor);
 
             if !strip_head_path {
-                let dest_path = Path::new(&dest);
-                let mut extracted: u64 = 0;
-                for entry_res in archive.entries().unwrap() {
-                    let mut entry = match entry_res {
-                        Ok(e) => e,
-                        Err(_) => continue,
-                    };
-                    let entry_size = entry.size();
-                    let outpath = dest_path.join(entry.path().unwrap());
-                    if let Some(p) = outpath.parent() {
-                        fs::create_dir_all(p).unwrap_or(());
-                    }
-                    let _ = entry.unpack(&outpath);
-                    extracted += entry_size;
-                    progress_callback(extracted, estimated_total.max(extracted));
-                }
+                archive.unpack(&dest).unwrap_or(());
             } else {
                 let dest_path = Path::new(&dest);
                 let mut entries = archive.entries().unwrap();
-                let mut extracted: u64 = 0;
 
-                let first_entry = match entries.next() {
-                    Some(e) => e.unwrap(),
-                    None => return,
-                };
+                let first_entry = match entries.next() { Some(e) => e.unwrap(), None => return};
                 let first_path = first_entry.path().unwrap().to_path_buf();
-                let first_path = first_path
-                    .strip_prefix(".")
-                    .unwrap_or(&first_path)
-                    .to_path_buf();
-                let top = match first_path.components().next() {
-                    Some(c) => PathBuf::from(c.as_os_str()),
-                    None => PathBuf::new(),
-                };
+                let first_path = first_path.strip_prefix(".").unwrap_or(&first_path).to_path_buf();
+                let top = match first_path.components().next() { Some(c) => PathBuf::from(c.as_os_str()), None => PathBuf::new() };
 
                 let all_entries = std::iter::once(Ok(first_entry)).chain(entries);
                 for entry_res in all_entries {
                     let mut entry = entry_res.unwrap();
-                    let entry_size = entry.size();
                     let orig = entry.path().unwrap().to_path_buf();
                     let orig = orig.strip_prefix(".").unwrap_or(&orig).to_path_buf();
-                    let rel = match orig.strip_prefix(&top) {
-                        Ok(p) => p,
-                        Err(_) => orig.as_ref(),
-                    };
+                    let rel = match orig.strip_prefix(&top) { Ok(p) => p, Err(_) => orig.as_ref() };
 
-                    if rel.as_os_str().is_empty() {
-                        continue;
-                    }
+                    if rel.as_os_str().is_empty() { continue; }
                     let out = dest_path.to_path_buf().join(rel);
-                    if let Some(parent) = out.parent() {
-                        fs::create_dir_all(parent).unwrap();
-                    }
+                    if let Some(parent) = out.parent() { fs::create_dir_all(parent).unwrap(); }
                     entry.unpack(&out).unwrap();
-                    extracted += entry_size;
-                    progress_callback(extracted, estimated_total.max(extracted));
                 }
             }
         }
-        "7z" => {
-            // 7z library doesn't support progress callbacks easily,
-            // so we just report start and end
-            let file = fs::File::open(&archive_path).unwrap_or_else(|_| panic!("Failed to open 7z archive"));
-            let file_size = file.metadata().map(|m| m.len()).unwrap_or(0);
-            let estimated_total = file_size * 5; // 7z typically has good compression
-            drop(file);
-
-            progress_callback(0, estimated_total);
-            sevenz_rust2::decompress_file(archive_path.as_str(), dest.as_str()).unwrap_or(());
-            progress_callback(estimated_total, estimated_total);
-        }
+        "7z" => { sevenz_rust2::decompress_file(archive_path.as_str(), dest.as_str()).unwrap_or(()); }
         &_ => {}
     }
 }
 
 pub(crate) fn get_full_extension(path: &str) -> Option<&str> {
     const MULTI_PART_EXTS: [&str; 2] = ["tar.gz", "tar.xz"];
-    let file = path
-        .rsplit(|c| c == '/' || c == '\\')
-        .next()
-        .unwrap_or(path);
+    let file = path.rsplit(|c| c == '/' || c == '\\').next().unwrap_or(path);
     for ext in MULTI_PART_EXTS {
-        if file.ends_with(ext) {
-            return Some(ext);
-        }
+        if file.ends_with(ext) { return Some(ext); }
     }
-    file.rsplit('.')
-        .nth(1)
-        .map(|_| file.rsplitn(2, '.').collect::<Vec<_>>()[0])
+    file.rsplit('.').nth(1).map(|_| file.rsplitn(2, '.').collect::<Vec<_>>()[0])
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -519,4 +305,28 @@ pub struct KuroGroupInfos {
     pub src_files: Vec<KuroResource>,
     #[serde(rename = "dstFiles", default)]
     pub dst_files: Vec<KuroResource>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Hash)]
+pub struct TTLManifest {
+    pub retcode: i32,
+    pub message: String,
+    pub data: Option<ManifestFile>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Hash)]
+pub struct ManifestFile {
+    pub packages: Vec<ManifestPackage>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Hash)]
+pub struct ManifestPackage {
+    pub git_url: String,
+    pub version: String,
+    pub zip_sha256: String,
+    pub size: u64,
+    pub package_name: String,
+    pub raw_url: String,
+    pub default_download_mode: String,
+    pub file_list: Vec<String>,
 }
