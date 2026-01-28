@@ -3,7 +3,7 @@ use std::path::PathBuf;
 #[cfg(feature = "compat")]
 use crate::utils::downloader::AsyncDownloader;
 #[cfg(feature = "compat")]
-use crate::utils::extract_archive;
+use crate::utils::extract_archive_with_progress;
 #[cfg(feature = "compat")]
 use wincompatlib::wine::Wine;
 
@@ -29,7 +29,7 @@ pub async fn download_steamrt(path: PathBuf, dest: PathBuf, edition: String, bra
             let p = path.join("steamrt.tar.xz");
             let dld = d.download(p.as_path(), progress).await;
             if dld.is_ok() {
-                let ext = extract_archive(p.to_str().unwrap().to_string(), dest.to_str().unwrap().to_string(), true);
+                let ext = extract_archive_with_progress(p.to_str().unwrap().to_string(), dest.to_str().unwrap().to_string(), true, |_c, _t| {});
                 if ext { true } else { false }
             } else { false }
         } else { false }

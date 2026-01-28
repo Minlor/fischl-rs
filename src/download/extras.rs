@@ -22,13 +22,15 @@ impl Extras {
                                 let da = AsyncDownloader::new(Arc::new(c), pkg.git_url.clone()).await;
                                 if da.is_ok() {
                                     let mut du = da.unwrap();
-                                    let dl = du.download(d.join(&pkg.package_name).as_path(), progress).await;
+                                    let progress = Arc::new(progress);
+                                    let progress_cb = progress.clone();
+                                    let dl = du.download(d.join(&pkg.package_name).as_path(), move |cur, total, _, _| { progress_cb(cur, total) }).await;
                                     if dl.is_ok() {
                                         let ver_file = d.join("VERSION.txt");
                                         let pn = if package_id.as_str() == "jadeite" || package_id.as_str() == "keqingunlock" { package_id.clone() } else { package_type.clone() };
                                         if let Err(_) = fs::write(ver_file, format!("{}={}", pn.clone().to_ascii_uppercase(), &pkg.version).as_bytes()) { return false; }
                                         if extract_mode {
-                                            let ext = crate::utils::extract_archive(d.join(&pkg.package_name).to_str().unwrap().to_string(), dest.clone(), move_subdirs);
+                                            let ext = crate::utils::extract_archive_with_progress(d.join(&pkg.package_name).to_str().unwrap().to_string(), dest.clone(), move_subdirs, |_c, _t| {});
                                             if ext { true } else { false }
                                         } else { true }
                                     } else { false }
@@ -51,7 +53,7 @@ impl Extras {
                                         let da = AsyncDownloader::new(c.clone(), url).await;
                                         if da.is_ok() {
                                             let mut du = da.unwrap();
-                                            let dl = du.download(dest_path.as_path(), move |cur, total| { progress_cb(cur, total) }).await;
+                                            let dl = du.download(dest_path.as_path(), move |cur, total, _, _| { progress_cb(cur, total) }).await;
                                             if dl.is_err() { return false; }
                                         } else { return false; }
                                     }

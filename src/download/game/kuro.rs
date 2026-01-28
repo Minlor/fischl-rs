@@ -33,7 +33,7 @@ impl Kuro for Game {
         let manifest_file = dlp.clone().join("manifest.json");
         if manifest_file.exists() { tokio::fs::remove_file(manifest_file.clone()).await.unwrap(); }
         let client = Arc::new(AsyncDownloader::setup_client().await);
-        let mut dl = AsyncDownloader::new(client.clone(), manifest).await.unwrap().with_cancel_token(cancel_token.clone());;
+        let mut dl = AsyncDownloader::new(client.clone(), manifest).await.unwrap().with_cancel_token(cancel_token.clone());
         let dll = dl.download(manifest_file.clone(), |_, _, _, _| {}).await;
 
         if dll.is_ok() {
@@ -430,7 +430,7 @@ impl Kuro for Game {
                         let staging = staging.clone();
                         let zp = staging.join(z.dest.clone());
                         if zp.exists() {
-                            let r = extract_archive_with_progress(zp.to_str().unwrap().to_string(), staging.to_str().unwrap().to_string(), false, );
+                            let r = extract_archive_with_progress(zp.to_str().unwrap().to_string(), staging.to_str().unwrap().to_string(), false, |_,_| {});
                             if r {
                                 let fsize = z.entries.iter().map(|f| f.size).sum();
                                 progress_counter.fetch_add(fsize, Ordering::SeqCst);
@@ -452,7 +452,7 @@ impl Kuro for Game {
                             let fsize = d.entries.iter().map(|f| f.size).sum();
                             progress_counter.fetch_add(fsize, Ordering::SeqCst);
                             let processed = progress_counter.load(Ordering::SeqCst);
-                            progress(processed, total_bytes);
+                            progress(processed, total_bytes, 0, 0);
                         } else { eprintln!("Failed to apply krdiff!") }
                         if diffp.exists() { tokio::fs::remove_file(diffp).await.unwrap(); }
                     }
@@ -524,7 +524,7 @@ impl Kuro for Game {
                                 let progress_counter = progress_counter.clone();
                                 let net_tracker = net_tracker.clone();
                                 let disk_tracker = disk_tracker.clone();
-                                let _progress_cb = progress_cb.clone();
+                                let progress_cb = progress_cb.clone();
                                 let chunk_res = chunk_res.clone();
                                 let chunks_zip = chunks_zip.clone();
                                 let staging = staging.clone();
@@ -536,7 +536,7 @@ impl Kuro for Game {
                                     if staging_dir.exists() && cvalid {
                                         progress_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
                                         let processed = progress_counter.load(Ordering::SeqCst);
-                                        progress_cb(processed, total_bytes);
+                                        progress_cb(processed, total_bytes, 0, 0);
                                         return;
                                     }
 
@@ -643,7 +643,7 @@ impl Kuro for Game {
                     for z in zips {
                         let staging = staging.clone();
                         let zp = staging.join(z.dest.clone());
-                        if zp.exists() { extract_archive_with_progress(zp.to_str().unwrap().to_string(), staging.to_str().unwrap().to_string(), false); }
+                        if zp.exists() { extract_archive_with_progress(zp.to_str().unwrap().to_string(), staging.to_str().unwrap().to_string(), false, |_,_| {}); }
                     }
                 }
                 // Wuwa has krdiffs apply them if they exist
@@ -693,7 +693,7 @@ impl Kuro for Game {
         }
     }
 
-    async fn repair_game<F>(manifest: String, base_url: String, game_path: String, is_fast: bool, progress: F) -> bool where F: Fn(u64, u64) + Send + Sync + 'static {
+    async fn repair_game<F>(manifest: String, base_url: String, game_path: String, is_fast: bool, progress: F) -> bool where F: Fn(u64, u64, u64, u64) + Send + Sync + 'static {
         if manifest.is_empty() || game_path.is_empty() || base_url.is_empty() { return false; }
 
         let mainp = Path::new(game_path.as_str()).to_path_buf();
@@ -1004,7 +1004,7 @@ impl Kuro for Game {
                             let progress_counter = progress_counter.clone();
                             let net_tracker = net_tracker.clone();
                             let disk_tracker = disk_tracker.clone();
-                            let _progress_cb = progress_cb.clone();
+                            let progress_cb = progress_cb.clone();
                             let chunk_res = chunk_res.clone();
                             let chunks_zip = chunks_zip.clone();
                             let staging = staging.clone();
@@ -1015,6 +1015,8 @@ impl Kuro for Game {
 
                                 if staging_dir.exists() && cvalid {
                                     progress_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
+                                    let processed = progress_counter.load(Ordering::SeqCst);
+                                    progress_cb(processed, total_bytes, 0, 0);
                                     return;
                                 }
 

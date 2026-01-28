@@ -6,7 +6,7 @@ use wincompatlib::prelude::{WineBootExt, WineWithExt};
 use wincompatlib::wine::{Wine, WineArch};
 use crate::compat::Compat;
 use crate::utils::downloader::{AsyncDownloader};
-use crate::utils::{extract_archive, get_full_extension};
+use crate::utils::{extract_archive_with_progress, get_full_extension};
 
 #[cfg(feature = "compat")]
 impl Compat {
@@ -23,7 +23,7 @@ impl Compat {
                 let dp = d.to_path_buf().join(name.as_str());
                 let dla = dll.download(dp.clone(), progress).await;
                 if dla.is_ok() {
-                    if extract { extract_archive(dp.to_str().unwrap().to_string(), d.to_str().unwrap().to_string(), true); true } else { true }
+                    if extract { extract_archive_with_progress(dp.to_str().unwrap().to_string(), d.to_str().unwrap().to_string(), true, |_c, _t| {}); true } else { true }
                 } else { false }
             } else { false }
         } else {
