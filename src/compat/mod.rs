@@ -18,7 +18,7 @@ pub struct Compat {
 }
 
 #[cfg(feature = "compat")]
-pub async fn download_steamrt(path: PathBuf, dest: PathBuf, edition: String, branch: String, progress: impl FnMut(u64, u64, u64, u64) + Send + Sync + 'static) -> bool {
+pub async fn download_steamrt(path: PathBuf, dest: PathBuf, edition: String, branch: String, progress: impl FnMut(u64, u64, u64, u64) + Send + Sync + 'static, extract_progress: impl Fn(u64, u64) + Send + 'static) -> bool {
     if !path.exists() || edition.is_empty() || branch.is_empty() { false } else {
         let code = if edition.as_str() == "steamrt3" { "sniper" } else { "4" };
         let url = format!("https://repo.steampowered.com/{edition}/images/{branch}/SteamLinuxRuntime_{code}.tar.xz");
@@ -29,7 +29,7 @@ pub async fn download_steamrt(path: PathBuf, dest: PathBuf, edition: String, bra
             let p = path.join("steamrt.tar.xz");
             let dld = d.download(p.as_path(), progress).await;
             if dld.is_ok() {
-                let ext = extract_archive_with_progress(p.to_str().unwrap().to_string(), dest.to_str().unwrap().to_string(), true, |_c, _t| {});
+                let ext = extract_archive_with_progress(p.to_str().unwrap().to_string(), dest.to_str().unwrap().to_string(), true, extract_progress);
                 if ext { true } else { false }
             } else { false }
         } else { false }
