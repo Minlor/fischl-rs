@@ -1494,19 +1494,15 @@ async fn process_file_chunks(
                                     .await;
 
                                 if dl_result3.is_ok() {
-                                    let valid = validate_checksum(
-                                        chunk_path.as_path(),
-                                        c.chunk_md5.to_ascii_lowercase(),
-                                    )
-                                    .await;
+                                    let valid = validate_checksum(chunk_path.as_path(), c.chunk_md5.to_ascii_lowercase()).await;
                                     if valid && chunk_path.exists() {
-                                        let file = fs::File::open(&chunk_path).unwrap();
-                                        let mut reader = BufReader::with_capacity(10240, file);
-                                        let mut decoder = zstd::Decoder::new(&mut reader).unwrap();
-                                        let mut buf =
-                                            Vec::with_capacity(c.chunk_decompressed_size as usize);
-                                        std::io::copy(&mut decoder, &mut buf).unwrap();
-                                        write_tx.send((buf, c.chunk_on_file_offset)).await.unwrap();
+                                        if let Ok(file) = fs::File::open(&chunk_path) {
+                                            let mut reader = BufReader::with_capacity(10240, file);
+                                            if let Ok(mut decoder) = zstd::Decoder::new(&mut reader) {
+                                                let mut buf = Vec::with_capacity(c.chunk_decompressed_size as usize);
+                                                if std::io::copy(&mut decoder, &mut buf).is_ok() { let _ = write_tx.send((buf, c.chunk_on_file_offset)).await; }
+                                            }
+                                        }
                                     }
                                 } else {
                                     eprintln!(
@@ -1532,16 +1528,16 @@ async fn process_file_chunks(
                 }
             }
             for t in retry_tasks {
-                t.await.unwrap();
+                let _ = t.await; // Ignore JoinError - task may have panicked or been cancelled
             }
         });
         handles.push(handle);
     }
     drop(write_tx);
     for handle in handles {
-        handle.await.unwrap();
+        let _ = handle.await; // Ignore JoinError - task may have panicked or been cancelled
     }
-    writer_handle.await.unwrap();
+    let _ = writer_handle.await;
 
     // Done downloading - decrement counter
     if let Some(ref counter) = active_downloads {
@@ -1668,49 +1664,28 @@ async fn validate_file<F>(
                 } else {
                     let _processed = progress_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
                     // download bytes already tracked via net_tracker in process_file_chunks callback
+                    // Cleanup chunks - ignore errors (race conditions with other workers, files still in use)
                     for c in &chunk_task.chunks {
                         let chunk_path = chunks_dir.join(&c.chunk_name);
-                        if chunk_path.exists() {
-                            if let Err(e) = tokio::fs::remove_file(&chunk_path).await {
-                                eprintln!(
-                                    "Failed to delete chunk file {}: {}",
-                                    chunk_path.display(),
-                                    e
-                                );
-                            }
-                        }
+                        let _ = tokio::fs::remove_file(&chunk_path).await;
                     }
                 }
             } else {
                 let _processed = progress_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
                 // download bytes already tracked via net_tracker in process_file_chunks callback
+                // Cleanup chunks - ignore errors (race conditions with other workers, files still in use)
                 for c in &chunk_task.chunks {
                     let chunk_path = chunks_dir.join(&c.chunk_name);
-                    if chunk_path.exists() {
-                        if let Err(e) = tokio::fs::remove_file(&chunk_path).await {
-                            eprintln!(
-                                "Failed to delete chunk file {}: {}",
-                                chunk_path.display(),
-                                e
-                            );
-                        }
-                    }
+                    let _ = tokio::fs::remove_file(&chunk_path).await;
                 }
             }
         } else {
             let _processed = progress_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
             // download bytes already tracked via net_tracker in process_file_chunks callback
+            // Cleanup chunks - ignore errors (race conditions with other workers, files still in use)
             for c in &chunk_task.chunks {
                 let chunk_path = chunks_dir.join(&c.chunk_name);
-                if chunk_path.exists() {
-                    if let Err(e) = tokio::fs::remove_file(&chunk_path).await {
-                        eprintln!(
-                            "Failed to delete chunk file {}: {}",
-                            chunk_path.display(),
-                            e
-                        );
-                    }
-                }
+                let _ = tokio::fs::remove_file(&chunk_path).await;
             }
         }
     } else {
@@ -1721,18 +1696,11 @@ async fn validate_file<F>(
             }
         }
         let _processed = progress_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
-                    download_counter.fetch_add(compressed_size, Ordering::SeqCst);
+        download_counter.fetch_add(compressed_size, Ordering::SeqCst);
+        // Cleanup chunks - ignore errors (race conditions with other workers, files still in use)
         for c in &chunk_task.chunks {
             let chunk_path = chunks_dir.join(&c.chunk_name);
-            if chunk_path.exists() {
-                if let Err(e) = tokio::fs::remove_file(&chunk_path).await {
-                    eprintln!(
-                        "Failed to delete chunk file {}: {}",
-                        chunk_path.display(),
-                        e
-                    );
-                }
-            }
+            let _ = tokio::fs::remove_file(&chunk_path).await;
         }
     }
 }

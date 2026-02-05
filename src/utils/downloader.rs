@@ -493,14 +493,10 @@ impl AsyncDownloader {
                     None
                 };
 
-                let request = self
-                    .client
-                    .get(&self.uri)
-                    .header(RANGE, format!("bytes={downloaded}-"))
-                    .header(USER_AGENT, "lib/fischl-rs")
-                    .send()
-                    .await
-                    .unwrap();
+                let request = match self.client.get(&self.uri).header(RANGE, format!("bytes={downloaded}-")).header(USER_AGENT, "lib/fischl-rs").send().await {
+                    Ok(r) => r,
+                    Err(e) => { return Err(DownloadingError::Reqwest(e.to_string())); }
+                };
 
                 // HTTP 416 = provided range is overcame actual content length (means file is downloaded)
                 // I check this here because HEAD request can return 200 OK while GET - 416
@@ -561,7 +557,7 @@ impl AsyncDownloader {
 
                         // Now track and write the data
                         net_tracker.add_bytes(part.len() as u64);
-                        file.write_all(part).await.unwrap();
+                        if let Err(e) = file.write_all(part).await { return Err(DownloadingError::OutputFileError(path, e.to_string())); }
                         written_bytes += part.len() as u64;
                         disk_tracker.add_bytes(part.len() as u64);
 
