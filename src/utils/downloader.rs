@@ -252,6 +252,8 @@ pub enum DownloadingError {
     OutputFileMetadataError(PathBuf, String),
     #[error("Request error: {0}")]
     Reqwest(String),
+    #[error("Connection error: {0}")]
+    ConnectionError(String),
     #[error("Download cancelled")]
     Cancelled,
 }
@@ -290,34 +292,12 @@ impl AsyncDownloader {
             .build()
     }
 
-    pub async fn new<T: AsRef<str>>(
-        client: Arc<ClientWithMiddleware>,
-        uri: T,
-    ) -> Result<Self, reqwest::Error> {
+    pub async fn new<T: AsRef<str>>(client: Arc<ClientWithMiddleware>, uri: T) -> Result<Self, DownloadingError> {
         let uri = uri.as_ref();
-
-        let header = client
-            .head(uri)
-            .header(USER_AGENT, "lib/fischl-rs")
-            .send()
-            .await
-            .unwrap();
-        let length = header.headers().get("content-length").map(|len| {
-            len.to_str()
-                .unwrap()
-                .parse()
-                .expect("Requested site's content-length is not a number")
-        });
-
-        Ok(Self {
-            uri: uri.to_owned(),
-            length,
-            chunk_size: DEFAULT_CHUNK_SIZE,
-            continue_downloading: true,
-            check_free_space: true,
-            cancel_token: None,
-            client: client,
-        })
+        // HEAD request to get content length - fail early if we can't reach the server
+        let header = client.head(uri).header(USER_AGENT, "lib/fischl-rs").send().await.map_err(|e| DownloadingError::ConnectionError(e.to_string()))?;
+        let length = header.headers().get("content-length").and_then(|len| len.to_str().ok()?.parse().ok());
+        Ok(Self { uri: uri.to_owned(), length, chunk_size: DEFAULT_CHUNK_SIZE, continue_downloading: true, check_free_space: true, cancel_token: None, client })
     }
 
     #[inline]
@@ -440,29 +420,18 @@ impl AsyncDownloader {
         // Download data
         match file {
             Ok(mut file) => {
-                let request = self
-                    .client
-                    .head(&self.uri)
-                    .header(RANGE, format!("bytes={downloaded}-"))
-                    .header(USER_AGENT, "lib/fischl-rs")
-                    .send()
-                    .await
-                    .unwrap();
-
-                // Request content range (downloaded + remained content size)
-                // If finished or overcame: bytes */10611646760
-                // If not finished: bytes 10611646759-10611646759/10611646760
-                // https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Content-Range
-                if let Some(range) = request.headers().get("content-range") {
-                    // Finish downloading if header says that we've already downloaded all the data
-                    if range.to_str().unwrap().contains("*/") {
-                        progress(
-                            self.length.unwrap_or(downloaded as u64),
-                            self.length.unwrap_or(downloaded as u64),
-                            0,
-                            0,
-                        );
-                        return Ok(());
+                // Check if download is already complete via HEAD request - if request fails, just proceed with download
+                if let Ok(request) = self.client.head(&self.uri).header(RANGE, format!("bytes={downloaded}-")).header(USER_AGENT, "lib/fischl-rs").send().await {
+                    // Request content range (downloaded + remained content size)
+                    // If finished or overcame: bytes */10611646760
+                    // If not finished: bytes 10611646759-10611646759/10611646760
+                    // https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Content-Range
+                    if let Some(range) = request.headers().get("content-range") {
+                        // Finish downloading if header says that we've already downloaded all the data
+                        if range.to_str().unwrap_or("").contains("*/") {
+                            progress(self.length.unwrap_or(downloaded as u64), self.length.unwrap_or(downloaded as u64), 0, 0);
+                            return Ok(());
+                        }
                     }
                 }
 

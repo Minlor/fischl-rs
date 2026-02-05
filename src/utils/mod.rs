@@ -13,6 +13,14 @@ pub mod downloader;
 pub mod free_space;
 pub use downloader::SpeedTracker;
 
+/// Represents a chunk that failed to download after all retries
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FailedChunk {
+    pub file_name: String,
+    pub chunk_name: String,
+    pub error: String,
+}
+
 pub fn get_github_release(repository: String) -> Option<GithubRelease> {
     if repository.is_empty() {
         None

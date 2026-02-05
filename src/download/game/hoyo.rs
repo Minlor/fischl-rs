@@ -1,9 +1,7 @@
 use crate::download::game::{Game, Sophon};
 use crate::utils::downloader::AsyncDownloader;
-use crate::utils::proto::{
-    DeleteFiles, FileChunk, ManifestFile, PatchChunk, PatchFile, SophonDiff, SophonManifest,
-};
-use crate::utils::{SpeedTracker, hpatchz, move_all, validate_checksum};
+use crate::utils::proto::{DeleteFiles, FileChunk, ManifestFile, PatchChunk, PatchFile, SophonDiff, SophonManifest};
+use crate::utils::{FailedChunk, SpeedTracker, hpatchz, move_all, validate_checksum};
 use crossbeam_deque::{Injector, Steal, Worker};
 use prost::Message;
 use reqwest_middleware::ClientWithMiddleware;
@@ -119,6 +117,8 @@ impl Sophon for Game {
                 let active_downloads = Arc::new(AtomicU64::new(0));
                 // Count of files currently being validated (final checksum validation)
                 let active_validations = Arc::new(AtomicU64::new(0));
+                // Track failed chunks for reporting/retry
+                let failed_chunks: Arc<std::sync::Mutex<Vec<FailedChunk>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
                 let net_tracker = Arc::new(SpeedTracker::new());
                 let disk_tracker = Arc::new(SpeedTracker::new());
                 let progress = Arc::new(progress);
@@ -203,6 +203,7 @@ impl Sophon for Game {
                     let client = client.clone();
                     let cancel_token = cancel_token.clone();
                     let verified_files = verified_files.clone();
+                    let failed_chunks = failed_chunks.clone();
 
                     let mut retry_tasks = Vec::new();
                     let handle = tokio::task::spawn(async move {
@@ -245,6 +246,7 @@ impl Sophon for Game {
                                 let client = client.clone();
                                 let cancel_token = cancel_token.clone();
                                 let verified_files = verified_files.clone();
+                                let failed_chunks = failed_chunks.clone();
                                 async move {
                                     if let Some(token) = &cancel_token {
                                         if token.load(Ordering::Relaxed) {
@@ -266,6 +268,7 @@ impl Sophon for Game {
                                         disk_tracker.clone(),
                                         verified_files.clone(),
                                         Some(active_downloads.clone()),
+                                        Some(failed_chunks.clone()),
                                     )
                                     .await;
                                     active_verifications.fetch_sub(1, Ordering::SeqCst);
@@ -322,6 +325,15 @@ impl Sophon for Game {
                         return false;
                     }
                 }
+
+                // Check for failed chunks and report them
+                let failures = failed_chunks.lock().unwrap();
+                if !failures.is_empty() {
+                    eprintln!("\n=== Download completed with {} failed chunk(s) ===", failures.len());
+                    for fc in failures.iter() { eprintln!("  - File: {}, Chunk: {}, Error: {}", fc.file_name, fc.chunk_name, fc.error); }
+                    eprintln!("Please run 'Game Repair' after this download completes to fix affected files.\n");
+                }
+                drop(failures);
 
                 monitor_handle.abort();
                 // All files are complete make sure we report done just in case
@@ -920,20 +932,7 @@ impl Sophon for Game {
                                 let chunk_base = chunk_base.clone();
                                 let client = client.clone();
                                 async move {
-                                    process_file_chunks(
-                                        chunk_task.clone(),
-                                        chunks_dir.clone(),
-                                        mainp.clone(),
-                                        chunk_base.clone(),
-                                        client.clone(),
-                                        is_fast,
-                                        None,
-                                        net_tracker.clone(),
-                                        disk_tracker.clone(),
-                                        None,
-                                        None, // No phase tracking for repair
-                                    )
-                                    .await;
+                                    process_file_chunks(chunk_task.clone(), chunks_dir.clone(), mainp.clone(), chunk_base.clone(), client.clone(), is_fast, None, net_tracker.clone(), disk_tracker.clone(), None, None, None).await;
 
                                     let fp = mainp.join(chunk_task.clone().name);
                                     validate_file(
@@ -1246,6 +1245,7 @@ async fn process_file_chunks(
     disk_tracker: Arc<SpeedTracker>,
     verified_files: Option<Arc<std::sync::Mutex<std::collections::HashSet<String>>>>,
     active_downloads: Option<Arc<AtomicU64>>,
+    failed_chunks: Option<Arc<std::sync::Mutex<Vec<FailedChunk>>>>,
 ) {
     if chunk_task.r#type == 64 {
         return;
@@ -1313,6 +1313,7 @@ async fn process_file_chunks(
     }
 
     // Spawn worker tasks
+    let file_name = chunk_task.name.clone();
     let mut handles = Vec::with_capacity(30);
     for _i in 0..workers.len() {
         let local_worker = workers.pop().unwrap();
@@ -1327,6 +1328,8 @@ async fn process_file_chunks(
         let cancel_token = cancel_token.clone();
         let net_tracker = net_tracker.clone();
         let disk_tracker = disk_tracker.clone();
+        let failed_chunks = failed_chunks.clone();
+        let file_name = file_name.clone();
 
         let mut retry_tasks = Vec::new();
         let handle = tokio::task::spawn(async move {
@@ -1359,6 +1362,8 @@ async fn process_file_chunks(
                     let cancel_token = cancel_token.clone();
                     let net_tracker = net_tracker.clone();
                     let disk_tracker = disk_tracker.clone();
+                    let failed_chunks = failed_chunks.clone();
+                    let file_name = file_name.clone();
                     async move {
                         if let Some(token) = &cancel_token {
                             if token.load(Ordering::Relaxed) {
@@ -1505,12 +1510,11 @@ async fn process_file_chunks(
                                         }
                                     }
                                 } else {
-                                    eprintln!(
-                                        "Download of chunk {}/{} failed 3 times with error {}",
-                                        chunk_base,
-                                        c.chunk_name,
-                                        dl_result3.unwrap_err().to_string()
-                                    );
+                                    let err = dl_result3.unwrap_err().to_string();
+                                    eprintln!("Download of chunk {}/{} failed 3 times with error {}", chunk_base, c.chunk_name, err);
+                                    if let Some(ref fc) = failed_chunks {
+                                        fc.lock().unwrap().push(FailedChunk { file_name: file_name.clone(), chunk_name: c.chunk_name.clone(), error: err });
+                                    }
                                 }
                             }
                         }
@@ -1589,71 +1593,15 @@ async fn validate_file<F>(
                 );
             }
         }
-        process_file_chunks(
-            chunk_task.clone(),
-            chunks_dir.clone(),
-            staging_dir.clone(),
-            chunk_base.clone(),
-            client.clone(),
-            is_fast,
-            None,
-            net_tracker.clone(),
-            disk_tracker.clone(),
-            verified_files.clone(),
-            None, // Don't track as downloading during validation retries
-        )
-        .await;
+        process_file_chunks(chunk_task.clone(), chunks_dir.clone(), staging_dir.clone(), chunk_base.clone(), client.clone(), is_fast, None, net_tracker.clone(), disk_tracker.clone(), verified_files.clone(), None, None).await;
         let revalid = validate_checksum(fp.as_path(), chunk_task.md5.to_ascii_lowercase()).await;
         if !revalid {
-            if fp.exists() {
-                if let Err(e) = tokio::fs::remove_file(&fp).await {
-                    eprintln!(
-                        "Failed to delete incomplete file before re-retry: {}: {}",
-                        fp.display(),
-                        e
-                    );
-                }
-            }
-            process_file_chunks(
-                chunk_task.clone(),
-                chunks_dir.clone(),
-                staging_dir.clone(),
-                chunk_base.clone(),
-                client.clone(),
-                is_fast,
-                None,
-                net_tracker.clone(),
-                disk_tracker.clone(),
-                verified_files.clone(),
-                None, // Don't track as downloading during validation retries
-            )
-            .await;
-            let revalid2 =
-                validate_checksum(fp.as_path(), chunk_task.md5.to_ascii_lowercase()).await;
+            if fp.exists() { if let Err(e) = tokio::fs::remove_file(&fp).await { eprintln!("Failed to delete incomplete file before re-retry: {}: {}", fp.display(), e); } }
+            process_file_chunks(chunk_task.clone(), chunks_dir.clone(), staging_dir.clone(), chunk_base.clone(), client.clone(), is_fast, None, net_tracker.clone(), disk_tracker.clone(), verified_files.clone(), None, None).await;
+            let revalid2 = validate_checksum(fp.as_path(), chunk_task.md5.to_ascii_lowercase()).await;
             if !revalid2 {
-                if fp.exists() {
-                    if let Err(e) = tokio::fs::remove_file(&fp).await {
-                        eprintln!(
-                            "Failed to delete incomplete file before re-re-retry: {}: {}",
-                            fp.display(),
-                            e
-                        );
-                    }
-                }
-                process_file_chunks(
-                    chunk_task.clone(),
-                    chunks_dir.clone(),
-                    staging_dir.clone(),
-                    chunk_base.clone(),
-                    client.clone(),
-                    is_fast,
-                    None,
-                    net_tracker.clone(),
-                    disk_tracker.clone(),
-                    verified_files.clone(),
-                    None, // Don't track as downloading during validation retries
-                )
-                .await;
+                if fp.exists() { if let Err(e) = tokio::fs::remove_file(&fp).await { eprintln!("Failed to delete incomplete file before re-re-retry: {}: {}", fp.display(), e); } }
+                process_file_chunks(chunk_task.clone(), chunks_dir.clone(), staging_dir.clone(), chunk_base.clone(), client.clone(), is_fast, None, net_tracker.clone(), disk_tracker.clone(), verified_files.clone(), None, None).await;
                 let revalid3 =
                     validate_checksum(fp.as_path(), chunk_task.md5.to_ascii_lowercase()).await;
                 if !revalid3 {
