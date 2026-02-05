@@ -54,6 +54,7 @@ impl Kuro for Game {
             let progress = Arc::new(progress);
 
             // Monitor task using EMA smoothing
+            // progress_counter tracks pre-validated files, net_tracker.get_total() tracks downloaded bytes
             let monitor_handle = tokio::spawn({
                 let progress_counter = progress_counter.clone();
                 let net_tracker = net_tracker.clone();
@@ -62,7 +63,9 @@ impl Kuro for Game {
                 async move {
                     loop {
                         tokio::time::sleep(Duration::from_millis(500)).await;
-                        let current = progress_counter.load(Ordering::SeqCst);
+                        let validated = progress_counter.load(Ordering::SeqCst);
+                        let downloaded = net_tracker.get_total();
+                        let current = validated + downloaded;
                         let net_speed = net_tracker.update();
                         let disk_speed = disk_tracker.update();
                         progress(current, total_bytes, net_speed, disk_speed);
@@ -216,7 +219,7 @@ impl Kuro for Game {
                                             v.insert(chunk_task.dest.clone());
                                         }
                                     }
-                                    progress_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
+                                    // Bytes already tracked via net_tracker in download callback
                                 } else {
                                     // Retry download
                                     let mut dl = AsyncDownloader::new(
@@ -258,8 +261,7 @@ impl Kuro for Game {
                                     .await;
 
                                     if dlf.is_ok() && cvalid {
-                                        progress_counter
-                                            .fetch_add(chunk_task.size, Ordering::SeqCst);
+                                        // Bytes already tracked via net_tracker in download callback
                                     } else {
                                         // Retry 2nd time
                                         let mut dl = AsyncDownloader::new(
@@ -301,8 +303,7 @@ impl Kuro for Game {
                                         .await;
 
                                         if dlf.is_ok() && cvalid {
-                                            progress_counter
-                                                .fetch_add(chunk_task.size, Ordering::SeqCst);
+                                            // Bytes already tracked via net_tracker in download callback
                                         } else {
                                             eprintln!(
                                                 "Failed to download file {} after 2 retries!",
@@ -414,7 +415,9 @@ impl Kuro for Game {
                 async move {
                     loop {
                         tokio::time::sleep(Duration::from_millis(500)).await;
-                        let current = progress_counter.load(Ordering::SeqCst);
+                        let validated = progress_counter.load(Ordering::SeqCst);
+                        let downloaded = net_tracker.get_total();
+                        let current = validated + downloaded;
                         let net_speed = net_tracker.update();
                         let disk_speed = disk_tracker.update();
                         progress(current, total_bytes, net_speed, disk_speed);
@@ -564,8 +567,7 @@ impl Kuro for Game {
                                     .await;
 
                                     if dlf.is_ok() && cvalid {
-                                        progress_counter
-                                            .fetch_add(chunk_task.size, Ordering::SeqCst);
+                                        // Bytes already tracked via net_tracker in download callback
                                     } else {
                                         // Retry download
                                         let mut dl = AsyncDownloader::new(
@@ -589,8 +591,7 @@ impl Kuro for Game {
                                         .await;
 
                                         if dlf.is_ok() && cvalid {
-                                            progress_counter
-                                                .fetch_add(chunk_task.size, Ordering::SeqCst);
+                                            // Bytes already tracked via net_tracker in download callback
                                         } else {
                                             // Retry 2nd time
                                             let mut dl = AsyncDownloader::new(
@@ -617,8 +618,7 @@ impl Kuro for Game {
                                             .await;
 
                                             if dlf.is_ok() && cvalid {
-                                                progress_counter
-                                                    .fetch_add(chunk_task.size, Ordering::SeqCst);
+                                                // Bytes already tracked via net_tracker in download callback
                                             } else {
                                                 eprintln!(
                                                     "Failed to validate patch file {} after 2 retries!",
@@ -733,7 +733,9 @@ impl Kuro for Game {
                 async move {
                     loop {
                         tokio::time::sleep(Duration::from_millis(500)).await;
-                        let current = progress_counter.load(Ordering::SeqCst);
+                        let validated = progress_counter.load(Ordering::SeqCst);
+                        let downloaded = net_tracker.get_total();
+                        let current = validated + downloaded;
                         let net_speed = net_tracker.update();
                         let disk_speed = disk_tracker.update();
                         progress(current, total_bytes, net_speed, disk_speed);
@@ -820,7 +822,7 @@ impl Kuro for Game {
                                 };
 
                                 if dlf.is_ok() && cvalid {
-                                    progress_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
+                                    // Bytes already tracked via net_tracker in download callback
                                 } else {
                                     // Retry download
                                     let mut dl = AsyncDownloader::new(
@@ -848,8 +850,7 @@ impl Kuro for Game {
                                     };
 
                                     if dlf.is_ok() && cvalid {
-                                        progress_counter
-                                            .fetch_add(chunk_task.size, Ordering::SeqCst);
+                                        // Bytes already tracked via net_tracker in download callback
                                     } else {
                                         // Retry 2nd time
                                         let mut dl = AsyncDownloader::new(
@@ -877,8 +878,7 @@ impl Kuro for Game {
                                         };
 
                                         if dlf.is_ok() && cvalid {
-                                            progress_counter
-                                                .fetch_add(chunk_task.size, Ordering::SeqCst);
+                                            // Bytes already tracked via net_tracker in download callback
                                         } else {
                                             eprintln!(
                                                 "Failed to validate repair file {} after 2 retries!",
@@ -955,7 +955,9 @@ impl Kuro for Game {
                 async move {
                     loop {
                         tokio::time::sleep(Duration::from_millis(500)).await;
-                        let current = progress_counter.load(Ordering::SeqCst);
+                        let validated = progress_counter.load(Ordering::SeqCst);
+                        let downloaded = net_tracker.get_total();
+                        let current = validated + downloaded;
                         let net_speed = net_tracker.update();
                         let disk_speed = disk_tracker.update();
                         progress(current, total_bytes, net_speed, disk_speed);
@@ -1044,7 +1046,7 @@ impl Kuro for Game {
                                 .await;
 
                                 if dlf.is_ok() && cvalid {
-                                    progress_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
+                                    // Bytes already tracked via net_tracker in download callback
                                 } else {
                                     // Retry download
                                     let mut dl = AsyncDownloader::new(
@@ -1068,8 +1070,7 @@ impl Kuro for Game {
                                     .await;
 
                                     if dlf.is_ok() && cvalid {
-                                        progress_counter
-                                            .fetch_add(chunk_task.size, Ordering::SeqCst);
+                                        // Bytes already tracked via net_tracker in download callback
                                     } else {
                                         // Retry again
                                         let mut dl = AsyncDownloader::new(
@@ -1093,8 +1094,7 @@ impl Kuro for Game {
                                         .await;
 
                                         if dlf.is_ok() && cvalid {
-                                            progress_counter
-                                                .fetch_add(chunk_task.size, Ordering::SeqCst);
+                                            // Bytes already tracked via net_tracker in download callback
                                         } else {
                                             eprintln!(
                                                 "Failed to validate preload file {} after 2 retries!",

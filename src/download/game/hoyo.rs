@@ -124,6 +124,7 @@ impl Sophon for Game {
                 let progress = Arc::new(progress);
 
                 // Monitor task for real-time progress/speed reporting using EMA smoothing
+                // download_counter tracks pre-validated files' compressed sizes, net_tracker.get_total() tracks downloaded bytes
                 let monitor_handle = tokio::spawn({
                     let progress_counter = progress_counter.clone();
                     let download_counter = download_counter.clone();
@@ -136,7 +137,9 @@ impl Sophon for Game {
                     async move {
                         loop {
                             tokio::time::sleep(Duration::from_millis(500)).await;
-                            let download_current = download_counter.load(Ordering::SeqCst);
+                            let validated_download = download_counter.load(Ordering::SeqCst);
+                            let active_download = net_tracker.get_total();
+                            let download_current = validated_download + active_download;
                             let install_current = progress_counter.load(Ordering::SeqCst);
                             let net_speed = net_tracker.update();
                             let disk_speed = disk_tracker.update();
@@ -830,6 +833,7 @@ impl Sophon for Game {
                 let progress = Arc::new(progress);
 
                 // Monitor task for real-time progress/speed reporting using EMA smoothing
+                // download_counter tracks pre-validated files' compressed sizes, net_tracker.get_total() tracks downloaded bytes
                 let monitor_handle = tokio::spawn({
                     let progress_counter = progress_counter.clone();
                     let download_counter = download_counter.clone();
@@ -839,7 +843,9 @@ impl Sophon for Game {
                     async move {
                         loop {
                             tokio::time::sleep(Duration::from_millis(500)).await;
-                            let download_current = download_counter.load(Ordering::SeqCst);
+                            let validated_download = download_counter.load(Ordering::SeqCst);
+                            let active_download = net_tracker.get_total();
+                            let download_current = validated_download + active_download;
                             let install_current = progress_counter.load(Ordering::SeqCst);
                             let net_speed = net_tracker.update();
                             let disk_speed = disk_tracker.update();
@@ -1661,7 +1667,7 @@ async fn validate_file<F>(
                     );
                 } else {
                     let _processed = progress_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
-                    download_counter.fetch_add(compressed_size, Ordering::SeqCst);
+                    // download bytes already tracked via net_tracker in process_file_chunks callback
                     for c in &chunk_task.chunks {
                         let chunk_path = chunks_dir.join(&c.chunk_name);
                         if chunk_path.exists() {
@@ -1677,7 +1683,7 @@ async fn validate_file<F>(
                 }
             } else {
                 let _processed = progress_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
-                    download_counter.fetch_add(compressed_size, Ordering::SeqCst);
+                // download bytes already tracked via net_tracker in process_file_chunks callback
                 for c in &chunk_task.chunks {
                     let chunk_path = chunks_dir.join(&c.chunk_name);
                     if chunk_path.exists() {
@@ -1693,7 +1699,7 @@ async fn validate_file<F>(
             }
         } else {
             let _processed = progress_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
-                    download_counter.fetch_add(compressed_size, Ordering::SeqCst);
+            // download bytes already tracked via net_tracker in process_file_chunks callback
             for c in &chunk_task.chunks {
                 let chunk_path = chunks_dir.join(&c.chunk_name);
                 if chunk_path.exists() {
