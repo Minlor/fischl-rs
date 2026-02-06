@@ -616,13 +616,10 @@ impl Sophon for Game {
                                     if r {
                                         if chunk.original_filename.is_empty() {
                                             // Chunk is not a hdiff patchable, copy it over
-                                            let mut chunk_file =
-                                                fs::File::open(chunkp.as_path()).unwrap();
-                                            chunk_file
-                                                .seek(SeekFrom::Start(chunk.patch_offset))
-                                                .unwrap();
+                                            let mut chunk_file = match fs::File::open(chunkp.as_path()) { Ok(f) => f, Err(e) => { eprintln!("Failed to open chunk file {}: {}", chunkp.display(), e); continue; } };
+                                            if let Err(e) = chunk_file.seek(SeekFrom::Start(chunk.patch_offset)) { eprintln!("Failed to seek chunk file: {}", e); continue; }
                                             let mut r = vec![0u8; chunk.patch_length as usize];
-                                            chunk_file.read_exact(&mut r).unwrap();
+                                            if let Err(e) = chunk_file.read_exact(&mut r) { eprintln!("Failed to read chunk file: {}", e); continue; }
                                             let is_hdiff = r.starts_with(b"HDIFF13");
 
                                             // nap edge case ffs
@@ -674,16 +671,12 @@ impl Sophon for Game {
                                             }
                                         } else {
                                             // Chunk is hdiff patchable, patch it
-                                            let mut output = fs::File::create(&diffp).unwrap();
-                                            let mut chunk_file =
-                                                fs::File::open(chunkp.as_path()).unwrap();
-
-                                            chunk_file
-                                                .seek(SeekFrom::Start(chunk.patch_offset))
-                                                .unwrap();
+                                            let mut output = match fs::File::create(&diffp) { Ok(f) => f, Err(e) => { eprintln!("Failed to create diff file {}: {}", diffp.display(), e); continue; } };
+                                            let mut chunk_file = match fs::File::open(chunkp.as_path()) { Ok(f) => f, Err(e) => { eprintln!("Failed to open chunk file {}: {}", chunkp.display(), e); continue; } };
+                                            if let Err(e) = chunk_file.seek(SeekFrom::Start(chunk.patch_offset)) { eprintln!("Failed to seek chunk file: {}", e); continue; }
                                             let mut r = chunk_file.take(chunk.patch_length);
-                                            copy(&mut r, &mut output).unwrap();
-                                            output.flush().unwrap();
+                                            if let Err(e) = copy(&mut r, &mut output) { eprintln!("Failed to copy chunk data: {}", e); continue; }
+                                            let _ = output.flush();
                                             drop(output);
 
                                             let of = mainp.join(&chunk.original_filename);
