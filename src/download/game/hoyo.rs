@@ -1370,13 +1370,14 @@ async fn process_file_chunks(
                                 return;
                             }
                         }
-                        let mut dl = AsyncDownloader::new(
-                            client,
-                            format!("{}/{}", chunk_base, c.chunk_name),
-                        )
-                        .await
-                        .unwrap()
-                        .with_cancel_token(cancel_token.clone());
+                        let mut dl = match AsyncDownloader::new(client, format!("{}/{}", chunk_base, c.chunk_name)).await {
+                            Ok(d) => d.with_cancel_token(cancel_token.clone()),
+                            Err(e) => {
+                                eprintln!("Failed to init chunk download {}/{}: {}", chunk_base, c.chunk_name, e);
+                                if let Some(ref fc) = failed_chunks { fc.lock().unwrap().push(FailedChunk { file_name: file_name.clone(), chunk_name: c.chunk_name.clone(), error: e.to_string() }); }
+                                return;
+                            }
+                        };
 
                         // Simple byte tracking - just report bytes downloaded
                         let net_t = net_tracker.clone();
