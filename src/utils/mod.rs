@@ -41,27 +41,16 @@ pub fn get_github_release(repository: String) -> Option<GithubRelease> {
     }
 }
 
-pub fn extract_archive_with_progress<F>(archive_path: String, extract_dest: String, move_subdirs: bool, progress_callback: F, ) -> bool
-    where
-    F: Fn(u64, u64) + Send + 'static, {
+pub fn extract_archive_with_progress<F>(archive_path: String, extract_dest: String, move_subdirs: bool, progress_callback: F, ) -> bool where F: Fn(u64, u64) + Send + 'static {
     let src = Path::new(&archive_path);
     let dest = Path::new(&extract_dest);
 
     if !src.exists() {
         false
     } else {
-        if !dest.exists() {
-            fs::create_dir_all(dest).unwrap();
-        }
-        actually_uncompress_with_progress(
-            src.to_str().unwrap().to_string(),
-            dest.to_str().unwrap().to_string(),
-            move_subdirs,
-            progress_callback,
-        );
-        if src.exists() {
-            fs::remove_file(src).unwrap();
-        }
+        if !dest.exists() { fs::create_dir_all(dest).unwrap(); }
+        actually_uncompress_with_progress(src.to_str().unwrap().to_string(), dest.to_str().unwrap().to_string(), move_subdirs, progress_callback);
+        if src.exists() { fs::remove_file(src).unwrap(); }
         true
     }
 }
@@ -103,7 +92,6 @@ pub(crate) fn move_all<'a>(src: &'a Path, dst: &'a Path) -> Pin<Box<dyn Future<O
     })
 }
 
-/// Count total bytes of all files in a directory recursively
 pub(crate) async fn count_dir_bytes(path: &Path) -> io::Result<u64> {
     let mut total = 0u64;
     let mut dir = tokio::fs::read_dir(path).await?;
@@ -118,8 +106,6 @@ pub(crate) async fn count_dir_bytes(path: &Path) -> io::Result<u64> {
     Ok(total)
 }
 
-/// Move all files from src to dst with progress reporting
-/// progress callback: (current_bytes, total_bytes)
 pub(crate) async fn move_all_with_progress<F>(src: &Path, dst: &Path, total_bytes: u64, progress: &F) -> io::Result<u64> where F: Fn(u64, u64) + Send + Sync {
     let mut moved_bytes = 0u64;
     if !dst.exists() { tokio::fs::create_dir_all(dst).await?; }
@@ -176,28 +162,16 @@ pub fn is_process_running(process_name: &str) -> bool {
     sys.processes().values().any(|process| {
         if let Some(apn) = process.name().to_str() {
             let apns = apn.split('.').collect::<Vec<&str>>();
-            if let Some(apnn) = apns.first() {
-                return apnn.contains(pn);
-            }
+            if let Some(apnn) = apns.first() { return apnn.contains(pn); }
         }
         false
     })
 }
 
-pub fn wait_for_process<F>(
-    process_name: &str,
-    delay_ms: u64,
-    retries: usize,
-    mut callback: F,
-) -> bool
-where
-    F: FnMut(bool) -> bool,
-{
+pub fn wait_for_process<F>(process_name: &str, delay_ms: u64, retries: usize, mut callback: F) -> bool where F: FnMut(bool) -> bool {
     for _ in 0..retries {
         let found = is_process_running(process_name);
-        if callback(found) {
-            return found;
-        }
+        if callback(found) { return found; }
         std::thread::sleep(std::time::Duration::from_millis(delay_ms));
     }
     false
@@ -212,25 +186,20 @@ pub fn hpatchz<T: Into<PathBuf> + std::fmt::Debug>(bin_path: String, file: T, pa
     }
 }
 
-pub(crate) fn actually_uncompress_with_progress<F>(archive_path: String, dest: String, strip_head_path: bool, progress_callback: F, ) where
-    F: Fn(u64, u64) + Send + 'static,
-    {
+pub(crate) fn actually_uncompress_with_progress<F>(archive_path: String, dest: String, strip_head_path: bool, _progress_callback: F) where F: Fn(u64, u64) + Send + 'static {
     let ext = get_full_extension(archive_path.as_str()).unwrap();
     match ext {
         "zip" | "krzip" => {
             let file = match fs::File::open(&archive_path) { Ok(f) => f, Err(_) => return, };
-            let mut archive = match zip::ZipArchive::new(file) { Ok(a) => a, Err(_) => return, };
+            let mut archive = match zip::ZipArchive::new(file) { Ok(a) => a, Err(_) => return };
 
             // Calculate total uncompressed size
             let mut total_size: u64 = 0;
             for i in 0..archive.len() {
-                if let Ok(f) = archive.by_index(i) {
-                    total_size += f.size();
-                }
+                if let Ok(f) = archive.by_index(i) { total_size += f.size(); }
             }
-
+            archive.extract(dest.as_str()).unwrap();
             // TODO UNFUCK THE PROGRESS CALLBACK
-
         },
         "tar.gz" => {
             let archive = fs::File::open(archive_path).unwrap();

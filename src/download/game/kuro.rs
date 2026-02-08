@@ -12,12 +12,8 @@ use std::sync::atomic::{AtomicBool,AtomicU64,Ordering};
 use std::time::Duration;
 
 impl Kuro for Game {
-    async fn download<F>(manifest: String, base_url: String, game_path: String, progress: F, cancel_token: Option<Arc<AtomicBool>>, verified_files: Option<Arc<std::sync::Mutex<std::collections::HashSet<String>>>>) -> bool
-    where F: Fn(u64, u64, u64, u64, u64, u64, u8) + Send + Sync + 'static,
-    {
-        if manifest.is_empty() || game_path.is_empty() || base_url.is_empty() {
-            return false;
-        }
+    async fn download<F>(manifest: String, base_url: String, game_path: String, progress: F, cancel_token: Option<Arc<AtomicBool>>, verified_files: Option<Arc<std::sync::Mutex<std::collections::HashSet<String>>>>) -> bool where F: Fn(u64, u64, u64, u64, u64, u64, u8) + Send + Sync + 'static {
+        if manifest.is_empty() || game_path.is_empty() || base_url.is_empty() { return false; }
 
         let p = Path::new(game_path.as_str()).to_path_buf();
         let dlp = p.join("downloading");
@@ -132,21 +128,10 @@ impl Kuro for Game {
                                 let mut already_verified = false;
                                 if let Some(vf) = &verified_files {
                                     let v = vf.lock().unwrap();
-                                    if v.contains(&chunk_task.dest) {
-                                        already_verified = true;
-                                    }
+                                    if v.contains(&chunk_task.dest) { already_verified = true; }
                                 }
 
-                                let cvalid = if already_verified {
-                                    true
-                                } else {
-                                    validate_checksum(
-                                        staging_dir.as_path(),
-                                        chunk_task.md5.to_ascii_lowercase(),
-                                    )
-                                    .await
-                                };
-
+                                let cvalid = if already_verified { true } else { validate_checksum(staging_dir.as_path(), chunk_task.md5.to_ascii_lowercase()).await };
                                 if staging_dir.exists() && cvalid {
                                     if !already_verified {
                                         if let Some(vf) = &verified_files {
@@ -193,21 +178,15 @@ impl Kuro for Game {
                     // If cancelled, abort all spawned tasks instead of waiting
                     if let Some(token) = &cancel_token {
                         if token.load(Ordering::Relaxed) {
-                            for t in retry_tasks {
-                                t.abort();
-                            }
+                            for t in retry_tasks { t.abort(); }
                             return;
                         }
                     }
-                    for t in retry_tasks {
-                        let _ = t.await;
-                    }
+                    for t in retry_tasks { let _ = t.await; }
                 });
                 handles.push(handle);
             }
-            for handle in handles {
-                let _ = handle.await;
-            }
+            for handle in handles { let _ = handle.await; }
 
             if let Some(token) = &cancel_token {
                 if token.load(Ordering::Relaxed) {
@@ -215,7 +194,6 @@ impl Kuro for Game {
                     return false;
                 }
             }
-
             monitor_handle.abort();
 
             // Report failed chunks
@@ -237,9 +215,7 @@ impl Kuro for Game {
             // Final progress report
             progress(total_bytes, total_bytes, install_total, install_total, 0, 0, 0);
             true
-        } else {
-            false
-        }
+        } else { false }
     }
 
     async fn patch<F>(manifest: String, base_resources: String, base_zip: String, game_path: String, preloaded: bool, progress: F) -> bool where F: Fn(u64, u64, u64, u64, u64, u64, u8) + Send + Sync + 'static {
@@ -492,7 +468,6 @@ impl Kuro for Game {
                         if diffp.exists() { tokio::fs::remove_file(diffp).await.unwrap(); }
                     }
                 }
-
                 monitor_handle.abort();
 
                 // Report failed chunks
@@ -520,9 +495,7 @@ impl Kuro for Game {
                 progress(total_bytes, total_bytes, install_total, install_total, 0, 0, 0);
                 true
             }
-        } else {
-            false
-        }
+        } else { false }
     }
 
     async fn repair_game<F>(manifest: String, base_url: String, game_path: String, is_fast: bool, progress: F) -> bool where F: Fn(u64, u64, u64, u64, u64, u64, u8) + Send + Sync + 'static {
@@ -677,9 +650,7 @@ impl Kuro for Game {
             progress(total_bytes, total_bytes, 0, 0, 0, 0, 0);
             if p.exists() { let _ = tokio::fs::remove_dir_all(p.as_path()).await; }
             true
-        } else {
-            false
-        }
+        } else { false }
     }
 
     async fn preload<F>(manifest: String, base_resources: String, base_zip: String, game_path: String, progress: F) -> bool where F: Fn(u64, u64, u64, u64, u64, u64, u8) + Send + Sync + 'static {
@@ -840,7 +811,6 @@ impl Kuro for Game {
                 eprintln!("Some preload files could not be downloaded. The update may still work.\n");
             }
             drop(failures);
-
             // Preload complete
             progress(total_bytes, total_bytes, 0, 0, 0, 0, 0);
             true

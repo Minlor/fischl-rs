@@ -14,38 +14,19 @@ use std::time::Duration;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
 impl Sophon for Game {
-    async fn download<F>(
-        manifest: String,
-        chunk_base: String,
-        game_path: String,
-        progress: F,
-        cancel_token: Option<Arc<AtomicBool>>,
-        verified_files: Option<Arc<std::sync::Mutex<std::collections::HashSet<String>>>>,
-    ) -> bool
-    where
-        F: Fn(u64, u64, u64, u64, u64, u64, u8) + Send + Sync + 'static,
-    {
-        if manifest.is_empty() || game_path.is_empty() || chunk_base.is_empty() {
-            return false;
-        }
+    async fn download<F>(manifest: String, chunk_base: String, game_path: String, progress: F, cancel_token: Option<Arc<AtomicBool>>, verified_files: Option<Arc<std::sync::Mutex<std::collections::HashSet<String>>>>, ) -> bool where F: Fn(u64, u64, u64, u64, u64, u64, u8) + Send + Sync + 'static {
+        if manifest.is_empty() || game_path.is_empty() || chunk_base.is_empty() { return false; }
 
         let p = Path::new(game_path.as_str()).to_path_buf();
         let dlp = p.join("downloading");
         let dlr = p.join("repairing");
         let dlptch = p.join("patching");
 
-        if dlr.exists() {
-            fs::remove_dir_all(&dlr).unwrap();
-        }
-        if dlptch.exists() {
-            fs::remove_dir_all(&dlptch).unwrap();
-        }
+        if dlr.exists() { fs::remove_dir_all(&dlr).unwrap(); }
+        if dlptch.exists() { fs::remove_dir_all(&dlptch).unwrap(); }
 
         let client = Arc::new(AsyncDownloader::setup_client().await);
-        let mut dl = AsyncDownloader::new(client.clone(), manifest)
-            .await
-            .unwrap()
-            .with_cancel_token(cancel_token.clone());
+        let mut dl = AsyncDownloader::new(client.clone(), manifest).await.unwrap().with_cancel_token(cancel_token.clone());
         let file = dl.get_filename().await.to_string();
         let dlm = dl.download(dlp.clone().join(&file), |_, _, _, _| {}).await;
 
@@ -59,53 +40,24 @@ impl Sophon for Game {
             if rslt.is_ok() {
                 drop(writer);
 
-                let mut f = fs::OpenOptions::new()
-                    .read(true)
-                    .open(dlp.join("manifest").as_path())
-                    .unwrap();
+                let mut f = fs::OpenOptions::new().read(true).open(dlp.join("manifest").as_path()).unwrap();
                 let mut file_contents = Vec::new();
                 f.read_to_end(&mut file_contents).unwrap();
 
-                if dlp.join(&file).exists() {
-                    fs::remove_file(dlp.join(&file).as_path()).unwrap();
-                }
+                if dlp.join(&file).exists() { fs::remove_file(dlp.join(&file).as_path()).unwrap(); }
                 let chunks = dlp.join("chunk");
                 let staging = dlp.join("staging");
 
-                if !chunks.exists() {
-                    fs::create_dir_all(chunks.clone()).unwrap();
-                }
-                if !staging.exists() {
-                    fs::create_dir_all(staging.clone()).unwrap();
-                }
-                let decoded = tokio::task::spawn_blocking(move || {
-                    SophonManifest::decode(&mut Cursor::new(&file_contents)).unwrap()
-                })
-                .await
-                .unwrap();
+                if !chunks.exists() { fs::create_dir_all(chunks.clone()).unwrap(); }
+                if !staging.exists() { fs::create_dir_all(staging.clone()).unwrap(); }
+                let decoded = tokio::task::spawn_blocking(move || { SophonManifest::decode(&mut Cursor::new(&file_contents)).unwrap() }).await.unwrap();
 
                 // Install total = uncompressed file sizes
-                let install_total: u64 = decoded
-                    .files
-                    .iter()
-                    .filter(|f| f.r#type != 64)
-                    .map(|f| f.size)
-                    .sum();
+                let install_total: u64 = decoded.files.iter().filter(|f| f.r#type != 64).map(|f| f.size).sum();
                 // Download total = compressed chunk sizes
-                let download_total: u64 = decoded
-                    .files
-                    .iter()
-                    .filter(|f| f.r#type != 64)
-                    .flat_map(|f| f.chunks.iter())
-                    .map(|c| c.chunk_size)
-                    .sum();
+                let download_total: u64 = decoded.files.iter().filter(|f| f.r#type != 64).flat_map(|f| f.chunks.iter()).map(|c| c.chunk_size).sum();
                 // Build a map of file name -> compressed size for tracking skipped files
-                let file_compressed_sizes: std::collections::HashMap<String, u64> = decoded
-                    .files
-                    .iter()
-                    .filter(|f| f.r#type != 64)
-                    .map(|f| (f.name.clone(), f.chunks.iter().map(|c| c.chunk_size).sum()))
-                    .collect();
+                let file_compressed_sizes: std::collections::HashMap<String, u64> = decoded.files.iter().filter(|f| f.r#type != 64).map(|f| (f.name.clone(), f.chunks.iter().map(|c| c.chunk_size).sum())).collect();
                 let file_compressed_sizes = Arc::new(file_compressed_sizes);
                 let progress_counter = Arc::new(AtomicU64::new(0));
                 // Track effective download progress (includes skipped/already-validated files)
@@ -166,19 +118,17 @@ impl Sophon for Game {
                 let injector = Arc::new(Injector::<ManifestFile>::new());
                 let mut workers = Vec::new();
                 let mut stealers_list = Vec::new();
-                for _ in 0..6 {
+                for _ in 0..5 {
                     let w = Worker::<ManifestFile>::new_fifo();
                     stealers_list.push(w.stealer());
                     workers.push(w);
                 }
                 let stealers = Arc::new(stealers_list);
-                for task in decoded.files.into_iter() {
-                    injector.push(task);
-                }
-                let file_sem = Arc::new(tokio::sync::Semaphore::new(6));
+                for task in decoded.files.into_iter() { injector.push(task); }
+                let file_sem = Arc::new(tokio::sync::Semaphore::new(5));
 
                 // Spawn worker tasks
-                let mut handles = Vec::with_capacity(6);
+                let mut handles = Vec::with_capacity(5);
                 for _i in 0..workers.len() {
                     let local_worker = workers.pop().unwrap();
                     let stealers = stealers.clone();
@@ -209,24 +159,15 @@ impl Sophon for Game {
                     let handle = tokio::task::spawn(async move {
                         loop {
                             if let Some(token) = &cancel_token {
-                                if token.load(Ordering::Relaxed) {
-                                    break;
-                                }
+                                if token.load(Ordering::Relaxed) { break; }
                             }
-                            let job = local_worker
-                                .pop()
-                                .or_else(|| injector.steal().success())
-                                .or_else(|| {
+                            let job = local_worker.pop().or_else(|| injector.steal().success()).or_else(|| {
                                     for s in stealers.iter() {
-                                        if let Steal::Success(t) = s.steal() {
-                                            return Some(t);
-                                        }
+                                        if let Steal::Success(t) = s.steal() { return Some(t); }
                                     }
                                     None
                                 });
-                            let Some(chunk_task) = job else {
-                                break;
-                            };
+                            let Some(chunk_task) = job else { break; };
                             let permit = file_sem.clone().acquire_owned().await.unwrap();
 
                             let ct = tokio::spawn({
@@ -256,44 +197,13 @@ impl Sophon for Game {
                                     }
                                     // Track verification phase (checking if file exists/valid)
                                     active_verifications.fetch_add(1, Ordering::SeqCst);
-                                    process_file_chunks(
-                                        chunk_task.clone(),
-                                        chunks_dir.clone(),
-                                        staging_dir.clone(),
-                                        chunk_base.clone(),
-                                        client.clone(),
-                                        false,
-                                        cancel_token.clone(),
-                                        net_tracker.clone(),
-                                        disk_tracker.clone(),
-                                        verified_files.clone(),
-                                        Some(active_downloads.clone()),
-                                        Some(failed_chunks.clone()),
-                                    )
-                                    .await;
+                                    process_file_chunks(chunk_task.clone(), chunks_dir.clone(), staging_dir.clone(), chunk_base.clone(), client.clone(), false, cancel_token.clone(), net_tracker.clone(), disk_tracker.clone(), verified_files.clone(), Some(active_downloads.clone()), Some(failed_chunks.clone())).await;
                                     active_verifications.fetch_sub(1, Ordering::SeqCst);
 
                                     // Track validating phase (final checksum validation)
                                     active_validations.fetch_add(1, Ordering::SeqCst);
                                     let fp = staging_dir.join(chunk_task.clone().name);
-                                    validate_file(
-                                        chunk_task.clone(),
-                                        chunk_base.clone(),
-                                        chunks_dir.clone(),
-                                        staging_dir.clone(),
-                                        fp.clone(),
-                                        client.clone(),
-                                        progress_counter.clone(),
-                                        download_counter.clone(),
-                                        file_compressed_sizes.clone(),
-                                        progress_cb.clone(),
-                                        install_total,
-                                        false,
-                                        net_tracker.clone(),
-                                        disk_tracker.clone(),
-                                        verified_files.clone(),
-                                    )
-                                    .await;
+                                    validate_file(chunk_task.clone(), chunk_base.clone(), chunks_dir.clone(), staging_dir.clone(), fp.clone(), client.clone(), progress_counter.clone(), download_counter.clone(), file_compressed_sizes.clone(), progress_cb.clone(), install_total, false, net_tracker.clone(), disk_tracker.clone(), verified_files.clone()).await;
                                     active_validations.fetch_sub(1, Ordering::SeqCst);
                                     drop(permit);
                                 }
@@ -303,21 +213,15 @@ impl Sophon for Game {
                         // If cancelled, abort all spawned tasks instead of waiting
                         if let Some(token) = &cancel_token {
                             if token.load(Ordering::Relaxed) {
-                                for t in retry_tasks {
-                                    t.abort();
-                                }
+                                for t in retry_tasks { t.abort(); }
                                 return;
                             }
                         }
-                        for t in retry_tasks {
-                            let _ = t.await;
-                        }
+                        for t in retry_tasks { let _ = t.await; }
                     });
                     handles.push(handle);
                 }
-                for handle in handles {
-                    let _ = handle.await;
-                }
+                for handle in handles { let _ = handle.await; }
 
                 if let Some(token) = &cancel_token {
                     if token.load(Ordering::Relaxed) {
@@ -341,50 +245,25 @@ impl Sophon for Game {
                 progress(download_total, download_total, install_total, install_total, 0, 0, 5);
                 // Move from "staging" to "game_path" and delete "downloading" directory
                 let moved = move_all(Path::new(&staging), Path::new(&game_path)).await;
-                if moved.is_ok() {
-                    fs::remove_dir_all(dlp.as_path()).unwrap();
-                }
+                if moved.is_ok() { fs::remove_dir_all(dlp.as_path()).unwrap(); }
                 true
-            } else {
-                false
-            }
-        } else {
-            false
-        }
+            } else { false }
+        } else { false }
     }
 
-    async fn patch<F>(
-        manifest: String,
-        version: String,
-        chunk_base: String,
-        game_path: String,
-        hpatchz_path: String,
-        preloaded: bool,
-        progress: F,
-    ) -> bool
-    where
-        F: Fn(u64, u64, u64, u64, u64, u64, u8) + Send + Sync + 'static,
-    {
-        if manifest.is_empty() || game_path.is_empty() || chunk_base.is_empty() {
-            return false;
-        }
+    async fn patch<F>(manifest: String, version: String, chunk_base: String, game_path: String, hpatchz_path: String, preloaded: bool, progress: F, ) -> bool where F: Fn(u64, u64, u64, u64, u64, u64, u8) + Send + Sync + 'static {
+        if manifest.is_empty() || game_path.is_empty() || chunk_base.is_empty() { return false; }
 
         let mainp = Path::new(game_path.as_str()).to_path_buf();
         let p = mainp.join("patching");
         let dlp = p.join("downloading");
         let dlr = p.join("repairing");
 
-        if dlp.exists() {
-            fs::remove_dir_all(&dlp).unwrap();
-        }
-        if dlr.exists() {
-            fs::remove_dir_all(&dlr).unwrap();
-        }
+        if dlp.exists() { fs::remove_dir_all(&dlp).unwrap(); }
+        if dlr.exists() { fs::remove_dir_all(&dlr).unwrap(); }
 
         let client = Arc::new(AsyncDownloader::setup_client().await);
-        let mut dl = AsyncDownloader::new(client.clone(), manifest)
-            .await
-            .unwrap();
+        let mut dl = AsyncDownloader::new(client.clone(), manifest).await.unwrap();
         let file = dl.get_filename().await.to_string();
         let dll = dl.download(p.clone().join(&file), |_, _, _, _| {}).await;
 
@@ -402,36 +281,18 @@ impl Sophon for Game {
                 let mut file_contents = Vec::new();
                 f.read_to_end(&mut file_contents).unwrap();
 
-                if p.join(&file).exists() {
-                    fs::remove_file(p.join(&file).as_path()).unwrap();
-                }
+                if p.join(&file).exists() { fs::remove_file(p.join(&file).as_path()).unwrap(); }
                 let chunks = p.join("chunk");
                 let staging = p.join("staging");
 
-                if !chunks.exists() && !preloaded {
-                    fs::create_dir_all(chunks.clone()).unwrap();
-                }
-                if !staging.exists() && !preloaded {
-                    fs::create_dir_all(staging.clone()).unwrap();
-                }
-                let decoded = tokio::task::spawn_blocking(move || {
-                    SophonDiff::decode(&mut Cursor::new(&file_contents)).unwrap()
-                })
-                .await
-                .unwrap();
+                if !chunks.exists() && !preloaded { fs::create_dir_all(chunks.clone()).unwrap(); }
+                if !staging.exists() && !preloaded { fs::create_dir_all(staging.clone()).unwrap(); }
+                let decoded = tokio::task::spawn_blocking(move || { SophonDiff::decode(&mut Cursor::new(&file_contents)).unwrap() }).await.unwrap();
 
                 // Install total = file sizes after patching
-                let install_total: u64 = decoded
-                    .files
-                    .iter()
-                    .map(|f| {
-                        f.chunks
-                            .iter()
-                            .filter(|(v, _chunk)| version.as_str() == v.as_str())
-                            .map(|(_v, _chunk)| f.size)
-                            .sum::<u64>()
-                    })
-                    .sum();
+                let install_total: u64 = decoded.files.iter().map(|f| {
+                    f.chunks.iter().filter(|(v, _chunk)| version.as_str() == v.as_str()).map(|(_v, _chunk)| f.size).sum::<u64>()
+                    }).sum();
                 // Download total = patch chunk sizes (estimate same as install for patches)
                 let download_total = install_total;
                 let progress_counter = Arc::new(AtomicU64::new(0));
@@ -461,27 +322,16 @@ impl Sophon for Game {
                     let ff = Arc::new(file.clone());
                     let hpatchz_path = hpatchz_path.clone();
                     let output_path = staging.join(file.name.clone());
-                    let valid = validate_checksum(
-                        output_path.as_path(),
-                        file.clone().md5.to_ascii_lowercase(),
-                    )
-                    .await;
+                    let valid = validate_checksum(output_path.as_path(), file.clone().md5.to_ascii_lowercase()).await;
 
                     if output_path.exists() && valid {
                         progress_counter.fetch_add(file.size, Ordering::SeqCst);
                         continue;
                     } else {
-                        if let Some(parent) = output_path.parent() {
-                            fs::create_dir_all(parent).unwrap();
-                        }
+                        if let Some(parent) = output_path.parent() { fs::create_dir_all(parent).unwrap(); }
                     }
 
-                    let filtered: Vec<(String, PatchChunk)> = file
-                        .chunks
-                        .clone()
-                        .into_iter()
-                        .filter(|(v, _chunk)| version.as_str() == v.as_str())
-                        .collect();
+                    let filtered: Vec<(String, PatchChunk)> = file.chunks.clone().into_iter().filter(|(v, _chunk)| version.as_str() == v.as_str()).collect();
                     let net_tracker = net_tracker.clone();
                     let disk_tracker = disk_tracker.clone();
                     // File has patches to apply
@@ -496,19 +346,12 @@ impl Sophon for Game {
 
                             // User has predownloaded validate each chunk and apply patches
                             if preloaded {
-                                let r = validate_checksum(
-                                    chunkp.as_path(),
-                                    chunk.patch_md5.to_ascii_lowercase(),
-                                )
-                                .await;
+                                let r = validate_checksum(chunkp.as_path(), chunk.patch_md5.to_ascii_lowercase(), ).await;
                                 if r {
                                     if chunk.original_filename.is_empty() {
                                         // Chunk is not a hdiff patchable, copy it over
-                                        let mut chunk_file =
-                                            fs::File::open(chunkp.as_path()).unwrap();
-                                        chunk_file
-                                            .seek(SeekFrom::Start(chunk.patch_offset))
-                                            .unwrap();
+                                        let mut chunk_file = fs::File::open(chunkp.as_path()).unwrap();
+                                        chunk_file.seek(SeekFrom::Start(chunk.patch_offset)).unwrap();
                                         let mut r = vec![0u8; chunk.patch_length as usize];
                                         chunk_file.read_exact(&mut r).unwrap();
                                         let is_hdiff = r.starts_with(b"HDIFF13");
@@ -527,34 +370,19 @@ impl Sophon for Game {
                                                 if is_dir {
                                                     fs::create_dir_all(&of).unwrap();
                                                 } else {
-                                                    if let Some(parent) = of.parent() {
-                                                        fs::create_dir_all(parent).unwrap();
-                                                    }
+                                                    if let Some(parent) = of.parent() { fs::create_dir_all(parent).unwrap(); }
                                                     fs::File::create(&of).unwrap();
                                                 }
                                             } else {
                                                 let _r = fs::remove_file(&of);
                                                 match _r {
-                                                    Ok(_) => {
-                                                        fs::File::create(&of).unwrap();
-                                                    }
+                                                    Ok(_) => { fs::File::create(&of).unwrap(); }
                                                     Err(_) => {}
                                                 }
                                             }
-                                            if let Err(e) = hpatchz(
-                                                hpatchz_path.to_owned(),
-                                                &of,
-                                                &diffp,
-                                                &output_path,
-                                            ) {
-                                                eprintln!(
-                                                    "Failed to hpatchz without original_filename (has preload) with error: {}",
-                                                    e
-                                                );
-                                            }
+                                            if let Err(e) = hpatchz(hpatchz_path.to_owned(), &of, &diffp, &output_path, ) { eprintln!("Failed to hpatchz without original_filename (has preload) with error: {}", e); }
                                         } else {
-                                            let mut output =
-                                                fs::File::create(&output_path).unwrap();
+                                            let mut output = fs::File::create(&output_path).unwrap();
                                             let mut cursor = Cursor::new(&r);
                                             copy(&mut cursor, &mut output).unwrap();
                                             output.flush().unwrap();
@@ -563,56 +391,31 @@ impl Sophon for Game {
                                     } else {
                                         // Chunk is hdiff patchable, patch it
                                         let mut output = fs::File::create(&diffp).unwrap();
-                                        let mut chunk_file =
-                                            fs::File::open(chunkp.as_path()).unwrap();
+                                        let mut chunk_file = fs::File::open(chunkp.as_path()).unwrap();
 
-                                        chunk_file
-                                            .seek(SeekFrom::Start(chunk.patch_offset))
-                                            .unwrap();
+                                        chunk_file.seek(SeekFrom::Start(chunk.patch_offset)).unwrap();
                                         let mut r = chunk_file.take(chunk.patch_length);
                                         copy(&mut r, &mut output).unwrap();
                                         output.flush().unwrap();
                                         drop(output);
 
                                         let of = mainp.join(&chunk.original_filename);
-                                        if of.exists() {
-                                            if let Err(e) = hpatchz(
-                                                hpatchz_path.to_owned(),
-                                                &of,
-                                                &diffp,
-                                                &output_path,
-                                            ) {
-                                                eprintln!("Failed to hpatchz with error: {}", e);
-                                            }
-                                        }
+                                        if of.exists() { if let Err(e) = hpatchz(hpatchz_path.to_owned(), &of, &diffp, &output_path, ) { eprintln!("Failed to hpatchz with error: {}", e); } }
                                     }
-                                } else {
-                                    continue;
-                                }
+                                } else { continue; }
                             } else {
-                                let mut dl = AsyncDownloader::new(
-                                    client.clone(),
-                                    format!("{chunk_base}/{pn}").to_string(),
-                                )
-                                .await
-                                .unwrap();
+                                let mut dl = AsyncDownloader::new(client.clone(), format!("{chunk_base}/{pn}").to_string(), ).await.unwrap();
 
                                 let net_t = net_tracker.clone();
                                 let disk_t = disk_tracker.clone();
 
-                                let dlf = dl
-                                    .download(chunkp.clone(), move |_, _, ns, ds| {
+                                let dlf = dl.download(chunkp.clone(), move |_, _, ns, ds| {
                                         net_t.add_bytes(ns);
                                         disk_t.add_bytes(ds);
-                                    })
-                                    .await;
+                                    }).await;
 
                                 if dlf.is_ok() && chunkp.exists() {
-                                    let r = validate_checksum(
-                                        chunkp.as_path(),
-                                        chunk.patch_md5.to_ascii_lowercase(),
-                                    )
-                                    .await;
+                                    let r = validate_checksum(chunkp.as_path(), chunk.patch_md5.to_ascii_lowercase()).await;
                                     if r {
                                         if chunk.original_filename.is_empty() {
                                             // Chunk is not a hdiff patchable, copy it over
@@ -636,34 +439,19 @@ impl Sophon for Game {
                                                     if is_dir {
                                                         fs::create_dir_all(&of).unwrap();
                                                     } else {
-                                                        if let Some(parent) = of.parent() {
-                                                            fs::create_dir_all(parent).unwrap();
-                                                        }
+                                                        if let Some(parent) = of.parent() { fs::create_dir_all(parent).unwrap(); }
                                                         fs::File::create(&of).unwrap();
                                                     }
                                                 } else {
                                                     let _r = fs::remove_file(&of);
                                                     match _r {
-                                                        Ok(_) => {
-                                                            fs::File::create(&of).unwrap();
-                                                        }
+                                                        Ok(_) => { fs::File::create(&of).unwrap(); }
                                                         Err(_) => {}
                                                     }
                                                 }
-                                                if let Err(e) = hpatchz(
-                                                    hpatchz_path.to_owned(),
-                                                    &of,
-                                                    &diffp,
-                                                    &output_path,
-                                                ) {
-                                                    eprintln!(
-                                                        "Failed to hpatchz without original_filename (no preload) with error: {}",
-                                                        e
-                                                    );
-                                                }
+                                                if let Err(e) = hpatchz(hpatchz_path.to_owned(), &of, &diffp, &output_path, ) { eprintln!("Failed to hpatchz without original_filename (no preload) with error: {}", e); }
                                             } else {
-                                                let mut output =
-                                                    fs::File::create(&output_path).unwrap();
+                                                let mut output = fs::File::create(&output_path).unwrap();
                                                 let mut cursor = Cursor::new(&r);
                                                 copy(&mut cursor, &mut output).unwrap();
                                                 output.flush().unwrap();
@@ -680,35 +468,15 @@ impl Sophon for Game {
                                             drop(output);
 
                                             let of = mainp.join(&chunk.original_filename);
-                                            if of.exists() {
-                                                if let Err(e) = hpatchz(
-                                                    hpatchz_path.to_owned(),
-                                                    &of,
-                                                    &diffp,
-                                                    &output_path,
-                                                ) {
-                                                    eprintln!(
-                                                        "Failed to hpatchz with error: {}",
-                                                        e
-                                                    );
-                                                }
-                                            }
+                                            if of.exists() { if let Err(e) = hpatchz(hpatchz_path.to_owned(), &of, &diffp, &output_path, ) { eprintln!("Failed to hpatchz with error: {}", e); } }
                                         }
-                                    } else {
-                                        continue;
-                                    }
+                                    } else { continue; }
                                 }
                             } // preload check end
                         }
                         // end chunks
-                        let r2 =
-                            validate_checksum(output_path.as_path(), file.md5.to_ascii_lowercase())
-                                .await;
-                        if r2 {
-                            progress_counter.fetch_add(file.size, Ordering::SeqCst);
-                        } else {
-                            continue;
-                        }
+                        let r2 = validate_checksum(output_path.as_path(), file.md5.to_ascii_lowercase()).await;
+                        if r2 { progress_counter.fetch_add(file.size, Ordering::SeqCst); } else { continue; }
                     }
                 }
                 monitor_handle.abort();
@@ -717,48 +485,24 @@ impl Sophon for Game {
                 let moved = move_all(staging.as_ref(), game_path.as_ref()).await;
                 if moved.is_ok() {
                     // Delete all unneeded files after applying the patch and purging the temp directory
-                    if preloaded {
-                    } else {
-                        fs::remove_dir_all(p.as_path()).unwrap();
-                    }
-                    let purge_list: Vec<(String, DeleteFiles)> = decoded
-                        .delete_files
-                        .into_iter()
-                        .filter(|(v, _f)| version.as_str() == v.as_str())
-                        .collect();
+                    if preloaded {} else { fs::remove_dir_all(p.as_path()).unwrap(); }
+                    let purge_list: Vec<(String, DeleteFiles)> = decoded.delete_files.into_iter().filter(|(v, _f)| version.as_str() == v.as_str()).collect();
                     if !purge_list.is_empty() {
                         for (_v, df) in purge_list.into_iter() {
                             for f in df.files {
                                 let fp = mainp.join(&f.name);
-                                if fp.exists() {
-                                    fs::remove_file(&fp).unwrap();
-                                };
+                                if fp.exists() { fs::remove_file(&fp).unwrap(); };
                             }
                         }
                     }
                 }
                 true
-            } else {
-                false
-            }
-        } else {
-            false
-        }
+            } else { false }
+        } else { false }
     }
 
-    async fn repair_game<F>(
-        manifest: String,
-        chunk_base: String,
-        game_path: String,
-        is_fast: bool,
-        progress: F,
-    ) -> bool
-    where
-        F: Fn(u64, u64, u64, u64, u64, u64, u8) + Send + Sync + 'static,
-    {
-        if manifest.is_empty() || game_path.is_empty() || chunk_base.is_empty() {
-            return false;
-        }
+    async fn repair_game<F>(manifest: String, chunk_base: String, game_path: String, is_fast: bool, progress: F) -> bool where F: Fn(u64, u64, u64, u64, u64, u64, u8) + Send + Sync + 'static {
+        if manifest.is_empty() || game_path.is_empty() || chunk_base.is_empty() { return false; }
 
         let mainp = Path::new(game_path.as_str());
         let mainpbuf = mainp.to_path_buf();
@@ -766,17 +510,11 @@ impl Sophon for Game {
         let dlp = p.join("downloading");
         let dlptch = p.join("patching");
 
-        if dlp.exists() {
-            fs::remove_dir_all(&dlp).unwrap();
-        }
-        if dlptch.exists() {
-            fs::remove_dir_all(&dlptch).unwrap();
-        }
+        if dlp.exists() { fs::remove_dir_all(&dlp).unwrap(); }
+        if dlptch.exists() { fs::remove_dir_all(&dlptch).unwrap(); }
 
         let client = Arc::new(AsyncDownloader::setup_client().await);
-        let mut dl = AsyncDownloader::new(client.clone(), manifest)
-            .await
-            .unwrap();
+        let mut dl = AsyncDownloader::new(client.clone(), manifest).await.unwrap();
         let file = dl.get_filename().await.to_string();
         let dll = dl.download(p.clone().join(&file), |_, _, _, _| {}).await;
 
@@ -793,42 +531,18 @@ impl Sophon for Game {
                 let mut file_contents = Vec::new();
                 f.read_to_end(&mut file_contents).unwrap();
 
-                if p.join(&file).exists() {
-                    fs::remove_file(p.join(&file).as_path()).unwrap();
-                }
+                if p.join(&file).exists() { fs::remove_file(p.join(&file).as_path()).unwrap(); }
                 let chunks = p.join("chunk");
 
-                if !chunks.exists() {
-                    fs::create_dir_all(chunks.clone()).unwrap();
-                }
-                let decoded = tokio::task::spawn_blocking(move || {
-                    SophonManifest::decode(&mut Cursor::new(&file_contents)).unwrap()
-                })
-                .await
-                .unwrap();
+                if !chunks.exists() { fs::create_dir_all(chunks.clone()).unwrap(); }
+                let decoded = tokio::task::spawn_blocking(move || { SophonManifest::decode(&mut Cursor::new(&file_contents)).unwrap() }).await.unwrap();
 
                 // Install total = uncompressed file sizes
-                let install_total: u64 = decoded
-                    .files
-                    .iter()
-                    .filter(|f| f.r#type != 64)
-                    .map(|f| f.size)
-                    .sum();
+                let install_total: u64 = decoded.files.iter().filter(|f| f.r#type != 64).map(|f| f.size).sum();
                 // Download total = compressed chunk sizes
-                let download_total: u64 = decoded
-                    .files
-                    .iter()
-                    .filter(|f| f.r#type != 64)
-                    .flat_map(|f| f.chunks.iter())
-                    .map(|c| c.chunk_size)
-                    .sum();
+                let download_total: u64 = decoded.files.iter().filter(|f| f.r#type != 64).flat_map(|f| f.chunks.iter()).map(|c| c.chunk_size).sum();
                 // Build a map of file name -> compressed size for tracking skipped files
-                let file_compressed_sizes: std::collections::HashMap<String, u64> = decoded
-                    .files
-                    .iter()
-                    .filter(|f| f.r#type != 64)
-                    .map(|f| (f.name.clone(), f.chunks.iter().map(|c| c.chunk_size).sum()))
-                    .collect();
+                let file_compressed_sizes: std::collections::HashMap<String, u64> = decoded.files.iter().filter(|f| f.r#type != 64).map(|f| (f.name.clone(), f.chunks.iter().map(|c| c.chunk_size).sum())).collect();
                 let file_compressed_sizes = Arc::new(file_compressed_sizes);
                 let progress_counter = Arc::new(AtomicU64::new(0));
                 // Track effective download progress (includes skipped/already-validated files)
@@ -863,19 +577,17 @@ impl Sophon for Game {
                 let injector = Arc::new(Injector::<ManifestFile>::new());
                 let mut workers = Vec::new();
                 let mut stealers_list = Vec::new();
-                for _ in 0..6 {
+                for _ in 0..5 {
                     let w = Worker::<ManifestFile>::new_fifo();
                     stealers_list.push(w.stealer());
                     workers.push(w);
                 }
                 let stealers = Arc::new(stealers_list);
-                for task in decoded.files.into_iter() {
-                    injector.push(task);
-                }
-                let file_sem = Arc::new(tokio::sync::Semaphore::new(6));
+                for task in decoded.files.into_iter() { injector.push(task); }
+                let file_sem = Arc::new(tokio::sync::Semaphore::new(5));
 
                 // Spawn worker tasks
-                let mut handles = Vec::with_capacity(6);
+                let mut handles = Vec::with_capacity(5);
                 for _i in 0..workers.len() {
                     let local_worker = workers.pop().unwrap();
                     let stealers = stealers.clone();
@@ -897,20 +609,13 @@ impl Sophon for Game {
                     let mut retry_tasks = Vec::new();
                     let handle = tokio::task::spawn(async move {
                         loop {
-                            let job = local_worker
-                                .pop()
-                                .or_else(|| injector.steal().success())
-                                .or_else(|| {
+                            let job = local_worker.pop().or_else(|| injector.steal().success()).or_else(|| {
                                     for s in stealers.iter() {
-                                        if let Steal::Success(t) = s.steal() {
-                                            return Some(t);
-                                        }
+                                        if let Steal::Success(t) = s.steal() { return Some(t); }
                                     }
                                     None
                                 });
-                            let Some(chunk_task) = job else {
-                                break;
-                            };
+                            let Some(chunk_task) = job else { break; };
                             let permit = file_sem.clone().acquire_owned().await.unwrap();
 
                             let ct = tokio::task::spawn({
@@ -928,66 +633,28 @@ impl Sophon for Game {
                                     process_file_chunks(chunk_task.clone(), chunks_dir.clone(), mainp.clone(), chunk_base.clone(), client.clone(), is_fast, None, net_tracker.clone(), disk_tracker.clone(), None, None, None).await;
 
                                     let fp = mainp.join(chunk_task.clone().name);
-                                    validate_file(
-                                        chunk_task.clone(),
-                                        chunk_base.clone(),
-                                        chunks_dir.clone(),
-                                        mainp.clone(),
-                                        fp.clone(),
-                                        client.clone(),
-                                        progress_counter.clone(),
-                                        download_counter.clone(),
-                                        file_compressed_sizes.clone(),
-                                        progress_cb.clone(),
-                                        install_total,
-                                        is_fast,
-                                        net_tracker.clone(),
-                                        disk_tracker.clone(),
-                                        None,
-                                    )
-                                    .await;
+                                    validate_file(chunk_task.clone(), chunk_base.clone(), chunks_dir.clone(), mainp.clone(), fp.clone(), client.clone(), progress_counter.clone(), download_counter.clone(), file_compressed_sizes.clone(), progress_cb.clone(), install_total, is_fast, net_tracker.clone(), disk_tracker.clone(), None).await;
                                     drop(permit);
                                 }
                             }); // end task
                             retry_tasks.push(ct);
                         }
-                        for t in retry_tasks {
-                            let _ = t.await;
-                        }
+                        for t in retry_tasks { let _ = t.await; }
                     });
                     handles.push(handle);
                 }
-                for handle in handles {
-                    let _ = handle.await;
-                }
+                for handle in handles { let _ = handle.await; }
                 monitor_handle.abort();
                 // All files are complete make sure we report done just in case
                 progress(download_total, download_total, install_total, install_total, 0, 0, 0);
-                if p.exists() {
-                    fs::remove_dir_all(p.as_path()).unwrap();
-                }
+                if p.exists() { fs::remove_dir_all(p.as_path()).unwrap(); }
                 true
-            } else {
-                false
-            }
-        } else {
-            false
-        }
+            } else { false }
+        } else { false }
     }
 
-    async fn preload<F>(
-        manifest: String,
-        version: String,
-        chunk_base: String,
-        game_path: String,
-        progress: F,
-    ) -> bool
-    where
-        F: Fn(u64, u64, u64, u64, u64, u64, u8) + Send + Sync + 'static,
-    {
-        if manifest.is_empty() || game_path.is_empty() || chunk_base.is_empty() {
-            return false;
-        }
+    async fn preload<F>(manifest: String, version: String, chunk_base: String, game_path: String, progress: F) -> bool where F: Fn(u64, u64, u64, u64, u64, u64, u8) + Send + Sync + 'static {
+        if manifest.is_empty() || game_path.is_empty() || chunk_base.is_empty() { return false; }
 
         let mainp = Path::new(game_path.as_str()).to_path_buf();
         let p = mainp.join("patching");
@@ -995,17 +662,11 @@ impl Sophon for Game {
         let dlp = mainp.join("downloading");
 
         // If these directories exist delete them for safety
-        if dlr.exists() {
-            fs::remove_dir_all(&dlr).unwrap();
-        }
-        if dlp.exists() {
-            fs::remove_dir_all(&dlp).unwrap();
-        }
+        if dlr.exists() { fs::remove_dir_all(&dlr).unwrap(); }
+        if dlp.exists() { fs::remove_dir_all(&dlp).unwrap(); }
 
         let client = Arc::new(AsyncDownloader::setup_client().await);
-        let mut dl = AsyncDownloader::new(client.clone(), manifest)
-            .await
-            .unwrap();
+        let mut dl = AsyncDownloader::new(client.clone(), manifest).await.unwrap();
         let file = dl.get_filename().await.to_string();
         let dll = dl.download(p.clone().join(&file), |_, _, _, _| {}).await;
 
@@ -1023,39 +684,19 @@ impl Sophon for Game {
                 let mut file_contents = Vec::new();
                 f.read_to_end(&mut file_contents).unwrap();
 
-                if p.join(&file).exists() {
-                    fs::remove_file(p.join(&file).as_path()).unwrap();
-                }
-                if !p.join(".preload").exists() {
-                    fs::File::create(p.join(".preload")).unwrap();
-                }
+                if p.join(&file).exists() { fs::remove_file(p.join(&file).as_path()).unwrap(); }
+                if !p.join(".preload").exists() { fs::File::create(p.join(".preload")).unwrap(); }
                 let chunks = p.join("chunk");
                 let staging = p.join("staging");
 
-                if !chunks.exists() {
-                    fs::create_dir_all(chunks.clone()).unwrap();
-                }
-                if !staging.exists() {
-                    fs::create_dir_all(staging.clone()).unwrap();
-                }
-                let decoded = tokio::task::spawn_blocking(move || {
-                    SophonDiff::decode(&mut Cursor::new(&file_contents)).unwrap()
-                })
-                .await
-                .unwrap();
+                if !chunks.exists() { fs::create_dir_all(chunks.clone()).unwrap(); }
+                if !staging.exists() { fs::create_dir_all(staging.clone()).unwrap(); }
+                let decoded = tokio::task::spawn_blocking(move || { SophonDiff::decode(&mut Cursor::new(&file_contents)).unwrap() }).await.unwrap();
 
                 // Install total = file sizes after patching
-                let install_total: u64 = decoded
-                    .files
-                    .iter()
-                    .map(|f| {
-                        f.chunks
-                            .iter()
-                            .filter(|(v, _chunk)| version.as_str() == v.as_str())
-                            .map(|(_v, _chunk)| f.size)
-                            .sum::<u64>()
-                    })
-                    .sum();
+                let install_total: u64 = decoded.files.iter().map(|f| {
+                    f.chunks.iter().filter(|(v, _chunk)| version.as_str() == v.as_str()).map(|(_v, _chunk)| f.size).sum::<u64>()
+                }).sum();
                 // Download total = same as install for preload
                 let download_total = install_total;
                 let progress_counter = Arc::new(AtomicU64::new(0));
@@ -1085,19 +726,17 @@ impl Sophon for Game {
                 let injector = Arc::new(Injector::<PatchFile>::new());
                 let mut workers = Vec::new();
                 let mut stealers_list = Vec::new();
-                for _ in 0..8 {
+                for _ in 0..5 {
                     let w = Worker::<PatchFile>::new_fifo();
                     stealers_list.push(w.stealer());
                     workers.push(w);
                 }
                 let stealers = Arc::new(stealers_list);
-                for task in decoded.files.into_iter() {
-                    injector.push(task);
-                }
-                let file_sem = Arc::new(tokio::sync::Semaphore::new(8));
+                for task in decoded.files.into_iter() { injector.push(task); }
+                let file_sem = Arc::new(tokio::sync::Semaphore::new(5));
 
                 // Spawn worker tasks
-                let mut handles = Vec::with_capacity(8);
+                let mut handles = Vec::with_capacity(5);
                 for _i in 0..workers.len() {
                     let local_worker = workers.pop().unwrap();
                     let stealers = stealers.clone();
@@ -1116,20 +755,13 @@ impl Sophon for Game {
                     let mut retry_tasks = Vec::new();
                     let handle = tokio::task::spawn(async move {
                         loop {
-                            let job = local_worker
-                                .pop()
-                                .or_else(|| injector.steal().success())
-                                .or_else(|| {
+                            let job = local_worker.pop().or_else(|| injector.steal().success()).or_else(|| {
                                     for s in stealers.iter() {
-                                        if let Steal::Success(t) = s.steal() {
-                                            return Some(t);
-                                        }
+                                        if let Steal::Success(t) = s.steal() { return Some(t); }
                                     }
                                     None
                                 });
-                            let Some(chunk_task) = job else {
-                                break;
-                            };
+                            let Some(chunk_task) = job else { break; };
                             let permit = file_sem.clone().acquire_owned().await.unwrap();
 
                             let ct = tokio::spawn({
@@ -1141,12 +773,7 @@ impl Sophon for Game {
                                 let version = version.clone();
                                 let client = client.clone();
                                 async move {
-                                    let filtered: Vec<(String, PatchChunk)> = chunk_task
-                                        .chunks
-                                        .clone()
-                                        .into_iter()
-                                        .filter(|(v, _chunk)| version.as_str() == v.as_str())
-                                        .collect();
+                                    let filtered: Vec<(String, PatchChunk)> = chunk_task.chunks.clone().into_iter().filter(|(v, _chunk)| version.as_str() == v.as_str()).collect();
 
                                     // File has patches to apply
                                     if !filtered.is_empty() {
@@ -1154,43 +781,26 @@ impl Sophon for Game {
                                             let pn = chunk.patch_name;
                                             let chunkp = chunks_dir.join(pn.clone());
 
-                                            let cvalid = validate_checksum(
-                                                chunkp.as_path(),
-                                                chunk.patch_md5.to_ascii_lowercase(),
-                                            )
-                                            .await;
+                                            let cvalid = validate_checksum(chunkp.as_path(), chunk.patch_md5.to_ascii_lowercase()).await;
                                             if chunkp.exists() && cvalid {
-                                                progress_counter
-                                                    .fetch_add(chunk_task.size, Ordering::SeqCst);
+                                                progress_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
                                                 drop(permit);
                                                 return;
                                             }
 
-                                            let mut dl = AsyncDownloader::new(
-                                                client.clone(),
-                                                format!("{chunk_base}/{pn}").to_string(),
-                                            )
-                                            .await
-                                            .unwrap();
+                                            let mut dl = AsyncDownloader::new(client.clone(), format!("{chunk_base}/{pn}").to_string(), ).await.unwrap();
 
                                             // Simple byte tracking for preload download
                                             let net_t = net_tracker.clone();
                                             let disk_t = disk_tracker.clone();
-                                            let dlf = dl
-                                                .download(chunkp.clone(), move |_, _, ns, ds| {
+                                            let dlf = dl.download(chunkp.clone(), move |_, _, ns, ds| {
                                                     net_t.add_bytes(ns);
                                                     disk_t.add_bytes(ds);
-                                                })
-                                                .await;
-                                            let cvalid = validate_checksum(
-                                                chunkp.as_path(),
-                                                chunk.patch_md5.to_ascii_lowercase(),
-                                            )
-                                            .await;
+                                                }).await;
+                                            let cvalid = validate_checksum(chunkp.as_path(), chunk.patch_md5.to_ascii_lowercase()).await;
 
                                             if dlf.is_ok() && cvalid {
-                                                progress_counter
-                                                    .fetch_add(chunk_task.size, Ordering::SeqCst);
+                                                progress_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
                                             } else {
                                                 // Handle download or validation failure for this chunk
                                                 // For now, we just let the permit drop and the task finish
@@ -1204,80 +814,40 @@ impl Sophon for Game {
                             }); // end task
                             retry_tasks.push(ct);
                         }
-                        for t in retry_tasks {
-                            let _ = t.await;
-                        }
+                        for t in retry_tasks { let _ = t.await; }
                     });
                     handles.push(handle);
                 }
-                for handle in handles {
-                    let _ = handle.await;
-                }
+                for handle in handles { let _ = handle.await; }
                 monitor_handle.abort();
                 // All files are complete make sure we report done just in case
                 progress(download_total, download_total, install_total, install_total, 0, 0, 0);
                 true
-            } else {
-                false
-            }
-        } else {
-            false
-        }
+            } else { false }
+        } else { false }
     }
 }
 
-async fn process_file_chunks(
-    chunk_task: ManifestFile,
-    chunks_dir: PathBuf,
-    staging_dir: PathBuf,
-    chunk_base: String,
-    client: Arc<ClientWithMiddleware>,
-    is_fast: bool,
-    cancel_token: Option<Arc<AtomicBool>>,
-    net_tracker: Arc<SpeedTracker>,
-    disk_tracker: Arc<SpeedTracker>,
-    verified_files: Option<Arc<std::sync::Mutex<std::collections::HashSet<String>>>>,
-    active_downloads: Option<Arc<AtomicU64>>,
-    failed_chunks: Option<Arc<std::sync::Mutex<Vec<FailedChunk>>>>,
-) {
-    if chunk_task.r#type == 64 {
-        return;
-    }
+async fn process_file_chunks(chunk_task: ManifestFile, chunks_dir: PathBuf, staging_dir: PathBuf, chunk_base: String, client: Arc<ClientWithMiddleware>, is_fast: bool, cancel_token: Option<Arc<AtomicBool>>, net_tracker: Arc<SpeedTracker>, disk_tracker: Arc<SpeedTracker>, verified_files: Option<Arc<std::sync::Mutex<std::collections::HashSet<String>>>>, active_downloads: Option<Arc<AtomicU64>>, failed_chunks: Option<Arc<std::sync::Mutex<Vec<FailedChunk>>>>) {
+    if chunk_task.r#type == 64 { return; }
 
     if let Some(vf) = &verified_files {
         let v = vf.lock().unwrap();
-        if v.contains(&chunk_task.name) {
-            return;
-        }
+        if v.contains(&chunk_task.name) { return; }
     }
 
     let fp = staging_dir.join(&chunk_task.name);
-    let validstg = if is_fast {
-        fp.metadata()
-            .map(|m| m.len() == chunk_task.size)
-            .unwrap_or(false)
-    } else {
-        validate_checksum(fp.as_path(), chunk_task.md5.to_ascii_lowercase()).await
-    };
+    let validstg = if is_fast { fp.metadata().map(|m| m.len() == chunk_task.size).unwrap_or(false) } else { validate_checksum(fp.as_path(), chunk_task.md5.to_ascii_lowercase()).await };
     if fp.exists() && validstg {
         return;
     } else {
-        if let Some(parent) = fp.parent() {
-            tokio::fs::create_dir_all(parent).await.unwrap();
-        }
+        if let Some(parent) = fp.parent() { tokio::fs::create_dir_all(parent).await.unwrap(); }
     }
 
     // File needs downloading - track this in active_downloads counter
-    if let Some(ref counter) = active_downloads {
-        counter.fetch_add(1, Ordering::SeqCst);
-    }
+    if let Some(ref counter) = active_downloads { counter.fetch_add(1, Ordering::SeqCst); }
 
-    let file = tokio::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .open(&fp)
-        .await
-        .unwrap();
+    let file = tokio::fs::OpenOptions::new().create(true).write(true).open(&fp).await.unwrap();
     file.set_len(chunk_task.size).await.unwrap();
     let (write_tx, mut write_rx) = tokio::sync::mpsc::channel::<(Vec<u8>, u64)>(600);
 
@@ -1299,15 +869,13 @@ async fn process_file_chunks(
     let injector = Arc::new(Injector::<FileChunk>::new());
     let mut workers = Vec::new();
     let mut stealers_list = Vec::new();
-    for _ in 0..30 { let w = Worker::<FileChunk>::new_fifo();stealers_list.push(w.stealer());workers.push(w); }
+    for _ in 0..12 { let w = Worker::<FileChunk>::new_fifo();stealers_list.push(w.stealer());workers.push(w); }
     let stealers = Arc::new(stealers_list);
-    for task in chunk_task.chunks.into_iter() {
-        injector.push(task);
-    }
+    for task in chunk_task.chunks.into_iter() { injector.push(task); }
 
     // Spawn worker tasks
     let file_name = chunk_task.name.clone();
-    let mut handles = Vec::with_capacity(30);
+    let mut handles = Vec::with_capacity(12);
     for _i in 0..workers.len() {
         let local_worker = workers.pop().unwrap();
         let stealers = stealers.clone();
@@ -1328,24 +896,15 @@ async fn process_file_chunks(
         let handle = tokio::task::spawn(async move {
             loop {
                 if let Some(token) = &cancel_token {
-                    if token.load(Ordering::Relaxed) {
-                        break;
-                    }
+                    if token.load(Ordering::Relaxed) { break; }
                 }
-                let job = local_worker
-                    .pop()
-                    .or_else(|| injector.steal().success())
-                    .or_else(|| {
+                let job = local_worker.pop().or_else(|| injector.steal().success()).or_else(|| {
                         for s in stealers.iter() {
-                            if let Steal::Success(t) = s.steal() {
-                                return Some(t);
-                            }
+                            if let Steal::Success(t) = s.steal() { return Some(t); }
                         }
                         None
                     });
-                let Some(c) = job else {
-                    break;
-                };
+                let Some(c) = job else { break; };
 
                 let ct = tokio::spawn({
                     let chunk_path = chunks_dir.join(&c.chunk_name);
@@ -1359,9 +918,7 @@ async fn process_file_chunks(
                     let file_name = file_name.clone();
                     async move {
                         if let Some(token) = &cancel_token {
-                            if token.load(Ordering::Relaxed) {
-                                return;
-                            }
+                            if token.load(Ordering::Relaxed) { return; }
                         }
                         let mut dl = match AsyncDownloader::new(client, format!("{}/{}", chunk_base, c.chunk_name)).await {
                             Ok(d) => d.with_cancel_token(cancel_token.clone()),
@@ -1377,14 +934,9 @@ async fn process_file_chunks(
                         let disk_t = disk_tracker.clone();
                         let mut last_net = 0u64;
                         let mut last_disk = 0u64;
-                        let dl_result = dl
-                            .download(
-                                chunk_path.clone(),
-                                move |current, _total, _net_speed, _disk_speed| {
+                        let dl_result = dl.download(chunk_path.clone(), move |current, _total, _net_speed, _disk_speed| {
                                     let net_diff = current.saturating_sub(last_net);
-                                    if net_diff > 0 {
-                                        net_t.add_bytes(net_diff);
-                                    }
+                                    if net_diff > 0 { net_t.add_bytes(net_diff); }
                                     last_net = current;
 
                                     // Track disk speed from AsyncDownloader as well
@@ -1392,105 +944,72 @@ async fn process_file_chunks(
                                     // Let's check AsyncDownloader::download again.
                                     // Yes, current is written_bytes.
                                     let disk_diff = current.saturating_sub(last_disk);
-                                    if disk_diff > 0 {
-                                        disk_t.add_bytes(disk_diff);
-                                    }
+                                    if disk_diff > 0 { disk_t.add_bytes(disk_diff); }
                                     last_disk = current;
                                 },
-                            )
-                            .await;
+                            ).await;
 
                         if dl_result.is_ok() {
-                            let valid = validate_checksum(
-                                chunk_path.as_path(),
-                                c.chunk_md5.to_ascii_lowercase(),
-                            )
-                            .await;
+                            let valid = validate_checksum(chunk_path.as_path(), c.chunk_md5.to_ascii_lowercase()).await;
                             if valid && chunk_path.exists() {
                                 let file = fs::File::open(&chunk_path).unwrap();
                                 let mut reader = BufReader::with_capacity(10240, file);
                                 let mut decoder = zstd::Decoder::new(&mut reader).unwrap();
-                                let mut buf =
-                                    Vec::with_capacity(c.chunk_decompressed_size as usize);
+                                let mut buf = Vec::with_capacity(c.chunk_decompressed_size as usize);
                                 std::io::copy(&mut decoder, &mut buf).unwrap();
                                 write_tx.send((buf, c.chunk_on_file_offset)).await.unwrap();
                             }
                         } else {
                             // Check cancel token before retry
                             if let Some(token) = &cancel_token {
-                                if token.load(Ordering::Relaxed) {
-                                    return;
-                                }
+                                if token.load(Ordering::Relaxed) { return; }
                             }
                             // Retry the chunk
                             let net_t = net_tracker.clone();
                             let disk_t = disk_tracker.clone();
                             let mut last_net = 0u64;
                             let mut last_disk = 0u64;
-                            let dl_result2 = dl
-                                .download(
-                                    chunk_path.clone(),
-                                    move |current, _total, _net_speed, _disk_speed| {
+                            let dl_result2 = dl.download(chunk_path.clone(), move |current, _total, _net_speed, _disk_speed| {
                                         let net_diff = current.saturating_sub(last_net);
-                                        if net_diff > 0 {
-                                            net_t.add_bytes(net_diff);
-                                        }
+                                        if net_diff > 0 { net_t.add_bytes(net_diff); }
                                         last_net = current;
 
                                         let disk_diff = current.saturating_sub(last_disk);
-                                        if disk_diff > 0 {
-                                            disk_t.add_bytes(disk_diff);
-                                        }
+                                        if disk_diff > 0 { disk_t.add_bytes(disk_diff); }
                                         last_disk = current;
                                     },
-                                )
-                                .await;
+                                ).await;
 
                             if dl_result2.is_ok() {
-                                let valid = validate_checksum(
-                                    chunk_path.as_path(),
-                                    c.chunk_md5.to_ascii_lowercase(),
-                                )
-                                .await;
+                                let valid = validate_checksum(chunk_path.as_path(), c.chunk_md5.to_ascii_lowercase()).await;
                                 if valid && chunk_path.exists() {
                                     let file = fs::File::open(&chunk_path).unwrap();
                                     let mut reader = BufReader::with_capacity(10240, file);
                                     let mut decoder = zstd::Decoder::new(&mut reader).unwrap();
-                                    let mut buf =
-                                        Vec::with_capacity(c.chunk_decompressed_size as usize);
+                                    let mut buf = Vec::with_capacity(c.chunk_decompressed_size as usize);
                                     std::io::copy(&mut decoder, &mut buf).unwrap();
                                     write_tx.send((buf, c.chunk_on_file_offset)).await.unwrap();
                                 }
                             } else {
                                 // Check cancel token before second retry
                                 if let Some(token) = &cancel_token {
-                                    if token.load(Ordering::Relaxed) {
-                                        return;
-                                    }
+                                    if token.load(Ordering::Relaxed) { return; }
                                 }
                                 // Retry again
                                 let net_t = net_tracker.clone();
                                 let disk_t = disk_tracker.clone();
                                 let mut last_net = 0u64;
                                 let mut last_disk = 0u64;
-                                let dl_result3 = dl
-                                    .download(
-                                        chunk_path.clone(),
-                                        move |current, _total, _net_speed, _disk_speed| {
+                                let dl_result3 = dl.download(chunk_path.clone(), move |current, _total, _net_speed, _disk_speed| {
                                             let net_diff = current.saturating_sub(last_net);
-                                            if net_diff > 0 {
-                                                net_t.add_bytes(net_diff);
-                                            }
+                                            if net_diff > 0 { net_t.add_bytes(net_diff); }
                                             last_net = current;
 
                                             let disk_diff = current.saturating_sub(last_disk);
-                                            if disk_diff > 0 {
-                                                disk_t.add_bytes(disk_diff);
-                                            }
+                                            if disk_diff > 0 { disk_t.add_bytes(disk_diff); }
                                             last_disk = current;
                                         },
-                                    )
-                                    .await;
+                                    ).await;
 
                                 if dl_result3.is_ok() {
                                     let valid = validate_checksum(chunk_path.as_path(), c.chunk_md5.to_ascii_lowercase()).await;
@@ -1506,9 +1025,7 @@ async fn process_file_chunks(
                                 } else {
                                     let err = dl_result3.unwrap_err().to_string();
                                     eprintln!("Download of chunk {}/{} failed 3 times with error {}", chunk_base, c.chunk_name, err);
-                                    if let Some(ref fc) = failed_chunks {
-                                        fc.lock().unwrap().push(FailedChunk { file_name: file_name.clone(), chunk_name: c.chunk_name.clone(), error: err });
-                                    }
+                                    if let Some(ref fc) = failed_chunks { fc.lock().unwrap().push(FailedChunk { file_name: file_name.clone(), chunk_name: c.chunk_name.clone(), error: err }); }
                                 }
                             }
                         }
@@ -1519,74 +1036,34 @@ async fn process_file_chunks(
             // If cancelled, abort all spawned tasks instead of waiting
             if let Some(token) = &cancel_token {
                 if token.load(Ordering::Relaxed) {
-                    for t in retry_tasks {
-                        t.abort();
-                    }
+                    for t in retry_tasks { t.abort(); }
                     return;
                 }
             }
-            for t in retry_tasks {
-                let _ = t.await; // Ignore JoinError - task may have panicked or been cancelled
-            }
+            for t in retry_tasks { let _ = t.await; /* Ignore JoinError - task may have panicked or been cancelled */ }
         });
         handles.push(handle);
     }
     drop(write_tx);
-    for handle in handles {
-        let _ = handle.await; // Ignore JoinError - task may have panicked or been cancelled
-    }
+    for handle in handles { let _ = handle.await; /* Ignore JoinError - task may have panicked or been cancelled*/ }
     let _ = writer_handle.await;
 
     // Done downloading - decrement counter
-    if let Some(ref counter) = active_downloads {
-        counter.fetch_sub(1, Ordering::SeqCst);
-    }
+    if let Some(ref counter) = active_downloads { counter.fetch_sub(1, Ordering::SeqCst); }
 }
 
-async fn validate_file<F>(
-    chunk_task: ManifestFile,
-    chunk_base: String,
-    chunks_dir: PathBuf,
-    staging_dir: PathBuf,
-    fp: PathBuf,
-    client: Arc<ClientWithMiddleware>,
-    progress_counter: Arc<AtomicU64>,
-    download_counter: Arc<AtomicU64>,
-    file_compressed_sizes: Arc<std::collections::HashMap<String, u64>>,
-    _progress_cb: Arc<F>,
-    _total_bytes: u64,
-    is_fast: bool,
-    net_tracker: Arc<SpeedTracker>,
-    disk_tracker: Arc<SpeedTracker>,
-    verified_files: Option<Arc<std::sync::Mutex<std::collections::HashSet<String>>>>,
-) where
-    F: Fn(u64, u64, u64, u64, u64, u64, u8) + Send + Sync + 'static,
-{
+async fn validate_file<F>(chunk_task: ManifestFile, chunk_base: String, chunks_dir: PathBuf, staging_dir: PathBuf, fp: PathBuf, client: Arc<ClientWithMiddleware>, progress_counter: Arc<AtomicU64>, download_counter: Arc<AtomicU64>, file_compressed_sizes: Arc<std::collections::HashMap<String, u64>>, _progress_cb: Arc<F>, _total_bytes: u64, is_fast: bool, net_tracker: Arc<SpeedTracker>, disk_tracker: Arc<SpeedTracker>, verified_files: Option<Arc<std::sync::Mutex<std::collections::HashSet<String>>>>) where F: Fn(u64, u64, u64, u64, u64, u64, u8) + Send + Sync + 'static {
     // Get the compressed size for this file
     let compressed_size = file_compressed_sizes.get(&chunk_task.name).copied().unwrap_or(0);
     let mut already_verified = false;
     if let Some(vf) = &verified_files {
         let v = vf.lock().unwrap();
-        if v.contains(&chunk_task.name) {
-            already_verified = true;
-        }
+        if v.contains(&chunk_task.name) { already_verified = true; }
     }
 
-    let valid = if already_verified {
-        true
-    } else {
-        validate_checksum(fp.as_path(), chunk_task.md5.to_ascii_lowercase()).await
-    };
+    let valid = if already_verified { true } else { validate_checksum(fp.as_path(), chunk_task.md5.to_ascii_lowercase()).await };
     if !valid {
-        if fp.exists() {
-            if let Err(e) = tokio::fs::remove_file(&fp).await {
-                eprintln!(
-                    "Failed to delete incomplete file before retry: {}: {}",
-                    fp.display(),
-                    e
-                );
-            }
-        }
+        if fp.exists() { if let Err(e) = tokio::fs::remove_file(&fp).await { eprintln!("Failed to delete incomplete file before retry: {}: {}", fp.display(), e); } }
         process_file_chunks(chunk_task.clone(), chunks_dir.clone(), staging_dir.clone(), chunk_base.clone(), client.clone(), is_fast, None, net_tracker.clone(), disk_tracker.clone(), verified_files.clone(), None, None).await;
         let revalid = validate_checksum(fp.as_path(), chunk_task.md5.to_ascii_lowercase()).await;
         if !revalid {
@@ -1596,13 +1073,8 @@ async fn validate_file<F>(
             if !revalid2 {
                 if fp.exists() { if let Err(e) = tokio::fs::remove_file(&fp).await { eprintln!("Failed to delete incomplete file before re-re-retry: {}: {}", fp.display(), e); } }
                 process_file_chunks(chunk_task.clone(), chunks_dir.clone(), staging_dir.clone(), chunk_base.clone(), client.clone(), is_fast, None, net_tracker.clone(), disk_tracker.clone(), verified_files.clone(), None, None).await;
-                let revalid3 =
-                    validate_checksum(fp.as_path(), chunk_task.md5.to_ascii_lowercase()).await;
-                if !revalid3 {
-                    eprintln!(
-                        "Failed to validate file after 3 retries! Please run game repair after finishing. Affected file: {}",
-                        chunk_task.name.clone()
-                    );
+                let revalid3 = validate_checksum(fp.as_path(), chunk_task.md5.to_ascii_lowercase()).await;
+                if !revalid3 { eprintln!("Failed to validate file after 3 retries! Please run game repair after finishing. Affected file: {}", chunk_task.name.clone());
                 } else {
                     let _processed = progress_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
                     // download bytes already tracked via net_tracker in process_file_chunks callback
