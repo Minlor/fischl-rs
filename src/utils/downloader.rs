@@ -229,11 +229,11 @@ fn global_download_semaphore() -> &'static tokio::sync::Semaphore {
         .get_or_init(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_DOWNLOADS_LIMITED))
 }
 
-/// Sets the global download speed limit in KiB/s. Set to 0 for unlimited.
+/// Sets the global download speed limit in KB/s. Set to 0 for unlimited.
 ///
 /// This limiter is shared across all concurrent downloads running inside this process.
-pub fn set_global_download_speed_limit_kib(kib_per_sec: u64) {
-    let bps = kib_per_sec.saturating_mul(1024);
+pub fn set_global_download_speed_limit_kb(kb_per_sec: u64) {
+    let bps = kb_per_sec.saturating_mul(1000);
     global_download_rate_limiter().set_limit_bps(bps);
 }
 

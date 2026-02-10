@@ -143,12 +143,12 @@ pub(crate) async fn validate_checksum(file: &Path, checksum: String) -> bool {
 
 #[inline]
 pub fn prettify_bytes(bytes: u64) -> String {
-    if bytes > 1024 * 1024 * 1024 {
-        format!("{:.2} GB", bytes as f64 / 1024.0 / 1024.0 / 1024.0)
-    } else if bytes > 1024 * 1024 {
-        format!("{:.2} MB", bytes as f64 / 1024.0 / 1024.0)
-    } else if bytes > 1024 {
-        format!("{:.2} KB", bytes as f64 / 1024.0)
+    if bytes > 1000 * 1000 * 1000 {
+        format!("{:.2} GB", bytes as f64 / 1000.0 / 1000.0 / 1000.0)
+    } else if bytes > 1000 * 1000 {
+        format!("{:.2} MB", bytes as f64 / 1000.0 / 1000.0)
+    } else if bytes > 1000 {
+        format!("{:.2} KB", bytes as f64 / 1000.0)
     } else {
         format!("{:.2} B", bytes)
     }
