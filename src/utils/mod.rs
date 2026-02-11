@@ -1,4 +1,5 @@
 use std::{fs, io};
+use std::hash::{BuildHasher, Hasher};
 use std::io::{Error, Read, Write};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -273,6 +274,26 @@ pub(crate) fn get_full_extension(path: &str) -> Option<&str> {
         if file.ends_with(ext) { return Some(ext); }
     }
     file.rsplit('.').nth(1).map(|_| file.rsplitn(2, '.').collect::<Vec<_>>()[0])
+}
+
+pub fn url_safe_token(len: usize) -> String {
+    let mut hasher = std::hash::RandomState::new().build_hasher();
+    hasher.write_u64(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64);
+    let mut seed = hasher.finish();
+    let chars: String = (0..len).map(|_| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let idx = (seed % 64) as usize;
+            match idx {
+                0..=25 => b'A' + idx as u8,
+                26..=51 => b'a' + (idx - 26) as u8,
+                52..=61 => b'0' + (idx - 52) as u8,
+                62 => b'-',
+                _ => b'_',
+            }.to_string()
+        }).collect();
+    chars
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
