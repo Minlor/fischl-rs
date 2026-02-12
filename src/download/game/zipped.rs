@@ -53,20 +53,7 @@ impl Zipped for Game {
         ret
     }
 
-    async fn patch(
-        _url: String,
-        _game_path: String,
-        _progress: impl Fn(u64, u64, u64, u64) + Send + Sync + 'static,
-    ) -> bool {
-        true
-    }
+    async fn patch(_url: String, _game_path: String, _progress: impl Fn(u64, u64, u64, u64) + Send + Sync + 'static, _cancel_token: Option<Arc<AtomicBool>>) -> bool { true }
 
-    async fn repair_game(
-        _res_list: String,
-        _game_path: String,
-        _is_fast: bool,
-        _progress: impl Fn(u64, u64, u64, u64) + Send + Sync + 'static,
-    ) -> bool {
-        true
-    }
+    async fn repair_game(_res_list: String, _game_path: String, _is_fast: bool, _progress: impl Fn(u64, u64, u64, u64) + Send + Sync + 'static, _cancel_token: Option<Arc<AtomicBool>>) -> bool { true }
 }

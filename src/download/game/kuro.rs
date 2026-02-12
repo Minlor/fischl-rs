@@ -218,7 +218,7 @@ impl Kuro for Game {
         } else { false }
     }
 
-    async fn patch<F>(manifest: String, base_resources: String, base_zip: String, game_path: String, preloaded: bool, progress: F) -> bool where F: Fn(u64, u64, u64, u64, u64, u64, u8) + Send + Sync + 'static {
+    async fn patch<F>(manifest: String, base_resources: String, base_zip: String, game_path: String, preloaded: bool, progress: F, cancel_token: Option<Arc<AtomicBool>>) -> bool where F: Fn(u64, u64, u64, u64, u64, u64, u8) + Send + Sync + 'static {
         if manifest.is_empty() || game_path.is_empty() || base_resources.is_empty() || base_zip.is_empty() { return false; }
 
         let mainp = Path::new(game_path.as_str());
@@ -234,7 +234,7 @@ impl Kuro for Game {
         let client = Arc::new(AsyncDownloader::setup_client().await);
         let dl_result = AsyncDownloader::new(client.clone(), manifest).await;
         if dl_result.is_err() { eprintln!("Failed to connect for patch manifest: {:?}", dl_result.err()); return false; }
-        let mut dl = dl_result.unwrap();
+        let mut dl = dl_result.unwrap().with_cancel_token(cancel_token.clone());
         let dll = dl.download(manifest_file.clone(), |_, _, _, _| {}).await;
 
         if dll.is_ok() {
@@ -367,10 +367,12 @@ impl Kuro for Game {
                     let staging = staging.clone();
                     let client = client.clone();
                     let failed_chunks = failed_chunks.clone();
+                    let cancel_token = cancel_token.clone();
 
                     let mut retry_tasks = Vec::new();
                     let handle = tokio::task::spawn(async move {
                         loop {
+                            if let Some(token) = &cancel_token { if token.load(Ordering::Relaxed) { break; } }
                             let job = local_worker.pop().or_else(|| injector.steal().success()).or_else(|| {
                                 for s in stealers.iter() { if let Steal::Success(t) = s.steal() { return Some(t); } }
                                 None
@@ -388,7 +390,9 @@ impl Kuro for Game {
                                 let staging = staging.clone();
                                 let client = client.clone();
                                 let failed_chunks = failed_chunks.clone();
+                                let cancel_token = cancel_token.clone();
                                 async move {
+                                    if let Some(token) = &cancel_token { if token.load(Ordering::Relaxed) { drop(permit); return; } }
                                     let staging_dir = staging.join(chunk_task.dest.clone());
                                     let cvalid = validate_checksum(staging_dir.as_path(), chunk_task.md5.to_ascii_lowercase()).await;
 
@@ -406,9 +410,10 @@ impl Kuro for Game {
                                     let mut success = false;
 
                                     for _attempt in 0..3 {
+                                        if let Some(token) = &cancel_token { if token.load(Ordering::Relaxed) { break; } }
                                         let dl_result = AsyncDownloader::new(client.clone(), url.clone()).await;
                                         if let Err(e) = dl_result { last_error = e.to_string(); continue; }
-                                        let mut dl = dl_result.unwrap();
+                                        let mut dl = dl_result.unwrap().with_cancel_token(cancel_token.clone());
                                         let net_t = net_tracker.clone();
                                         let disk_t = disk_tracker.clone();
                                         let dlf = dl.download(staging_dir.clone(), move |_, _, ns, ds| { net_t.add_bytes(ns); disk_t.add_bytes(ds); }).await;
@@ -426,11 +431,25 @@ impl Kuro for Game {
                             }); // end task
                             retry_tasks.push(ct);
                         }
+                        // If cancelled, abort all spawned tasks instead of waiting
+                        if let Some(token) = &cancel_token {
+                            if token.load(Ordering::Relaxed) {
+                                for t in retry_tasks { t.abort(); }
+                                return;
+                            }
+                        }
                         for t in retry_tasks { let _ = t.await; }
                     });
                     handles.push(handle);
                 }
                 for handle in handles { let _ = handle.await; }
+
+                if let Some(token) = &cancel_token {
+                    if token.load(Ordering::Relaxed) {
+                        monitor_handle.abort();
+                        return false;
+                    }
+                }
                 // PGR has krzips extract them if they exist
                 if files.zip_infos.is_some() {
                     let zips = files.zip_infos.unwrap();
@@ -498,7 +517,7 @@ impl Kuro for Game {
         } else { false }
     }
 
-    async fn repair_game<F>(manifest: String, base_url: String, game_path: String, is_fast: bool, progress: F) -> bool where F: Fn(u64, u64, u64, u64, u64, u64, u8) + Send + Sync + 'static {
+    async fn repair_game<F>(manifest: String, base_url: String, game_path: String, is_fast: bool, progress: F, cancel_token: Option<Arc<AtomicBool>>) -> bool where F: Fn(u64, u64, u64, u64, u64, u64, u8) + Send + Sync + 'static {
         if manifest.is_empty() || game_path.is_empty() || base_url.is_empty() { return false; }
 
         let mainp = Path::new(game_path.as_str()).to_path_buf();
@@ -514,7 +533,7 @@ impl Kuro for Game {
         let client = Arc::new(AsyncDownloader::setup_client().await);
         let dl_result = AsyncDownloader::new(client.clone(), manifest).await;
         if dl_result.is_err() { eprintln!("Failed to connect for repair manifest: {:?}", dl_result.err()); return false; }
-        let mut dl = dl_result.unwrap();
+        let mut dl = dl_result.unwrap().with_cancel_token(cancel_token.clone());
         let dll = dl.download(manifest_file.clone(), |_, _, _, _| {}).await;
 
         if dll.is_ok() {
@@ -576,10 +595,12 @@ impl Kuro for Game {
                 let staging = mainp.clone();
                 let client = client.clone();
                 let failed_chunks = failed_chunks.clone();
+                let cancel_token = cancel_token.clone();
 
                 let mut retry_tasks = Vec::new();
                 let handle = tokio::task::spawn(async move {
                     loop {
+                        if let Some(token) = &cancel_token { if token.load(Ordering::Relaxed) { break; } }
                         let job = local_worker.pop().or_else(|| injector.steal().success()).or_else(|| {
                             for s in stealers.iter() { if let Steal::Success(t) = s.steal() { return Some(t); } }
                             None
@@ -595,7 +616,9 @@ impl Kuro for Game {
                             let staging = staging.clone();
                             let client = client.clone();
                             let failed_chunks = failed_chunks.clone();
+                            let cancel_token = cancel_token.clone();
                             async move {
+                                if let Some(token) = &cancel_token { if token.load(Ordering::Relaxed) { drop(permit); return; } }
                                 let staging_dir = staging.join(chunk_task.dest.clone());
                                 let cvalid = if is_fast { staging_dir.metadata().map(|m| m.len() == chunk_task.size).unwrap_or(false) } else { validate_checksum(staging_dir.as_path(), chunk_task.md5.to_ascii_lowercase()).await };
 
@@ -610,9 +633,10 @@ impl Kuro for Game {
                                 let mut success = false;
 
                                 for _attempt in 0..3 {
+                                    if let Some(token) = &cancel_token { if token.load(Ordering::Relaxed) { break; } }
                                     let dl_result = AsyncDownloader::new(client.clone(), url.clone()).await;
                                     if let Err(e) = dl_result { last_error = e.to_string(); continue; }
-                                    let mut dl = dl_result.unwrap();
+                                    let mut dl = dl_result.unwrap().with_cancel_token(cancel_token.clone());
                                     let net_t = net_tracker.clone();
                                     let disk_t = disk_tracker.clone();
                                     let dlf = dl.download(staging_dir.clone(), move |_, _, ns, ds| { net_t.add_bytes(ns); disk_t.add_bytes(ds); }).await;
@@ -630,11 +654,25 @@ impl Kuro for Game {
                         }); // end task
                         retry_tasks.push(ct);
                     }
+                    // If cancelled, abort all spawned tasks instead of waiting
+                    if let Some(token) = &cancel_token {
+                        if token.load(Ordering::Relaxed) {
+                            for t in retry_tasks { t.abort(); }
+                            return;
+                        }
+                    }
                     for t in retry_tasks { let _ = t.await; }
                 });
                 handles.push(handle);
             }
             for handle in handles { let _ = handle.await; }
+
+            if let Some(token) = &cancel_token {
+                if token.load(Ordering::Relaxed) {
+                    monitor_handle.abort();
+                    return false;
+                }
+            }
             monitor_handle.abort();
 
             // Report failed chunks
@@ -653,7 +691,7 @@ impl Kuro for Game {
         } else { false }
     }
 
-    async fn preload<F>(manifest: String, base_resources: String, base_zip: String, game_path: String, progress: F) -> bool where F: Fn(u64, u64, u64, u64, u64, u64, u8) + Send + Sync + 'static {
+    async fn preload<F>(manifest: String, base_resources: String, base_zip: String, game_path: String, progress: F, cancel_token: Option<Arc<AtomicBool>>) -> bool where F: Fn(u64, u64, u64, u64, u64, u64, u8) + Send + Sync + 'static {
         if manifest.is_empty() || game_path.is_empty() || base_resources.is_empty() || base_zip.is_empty() { return false; }
 
         let mainp = Path::new(game_path.as_str());
@@ -669,7 +707,7 @@ impl Kuro for Game {
         let client = Arc::new(AsyncDownloader::setup_client().await);
         let dl_result = AsyncDownloader::new(client.clone(), manifest).await;
         if dl_result.is_err() { eprintln!("Failed to connect for preload manifest: {:?}", dl_result.err()); return false; }
-        let mut dl = dl_result.unwrap();
+        let mut dl = dl_result.unwrap().with_cancel_token(cancel_token.clone());
         let dll = dl.download(manifest_file.clone(), |_, _, _, _| {}).await;
 
         if dll.is_ok() {
@@ -737,10 +775,12 @@ impl Kuro for Game {
                 let staging = staging.clone();
                 let client = client.clone();
                 let failed_chunks = failed_chunks.clone();
+                let cancel_token = cancel_token.clone();
 
                 let mut retry_tasks = Vec::new();
                 let handle = tokio::task::spawn(async move {
                     loop {
+                        if let Some(token) = &cancel_token { if token.load(Ordering::Relaxed) { break; } }
                         let job = local_worker.pop().or_else(|| injector.steal().success()).or_else(|| {
                             for s in stealers.iter() { if let Steal::Success(t) = s.steal() { return Some(t); } }
                             None
@@ -758,7 +798,9 @@ impl Kuro for Game {
                             let staging = staging.clone();
                             let client = client.clone();
                             let failed_chunks = failed_chunks.clone();
+                            let cancel_token = cancel_token.clone();
                             async move {
+                                if let Some(token) = &cancel_token { if token.load(Ordering::Relaxed) { drop(permit); return; } }
                                 let staging_dir = staging.join(chunk_task.dest.clone());
                                 let cvalid = validate_checksum(staging_dir.as_path(), chunk_task.md5.to_ascii_lowercase()).await;
 
@@ -776,9 +818,10 @@ impl Kuro for Game {
                                 let mut success = false;
 
                                 for _attempt in 0..3 {
+                                    if let Some(token) = &cancel_token { if token.load(Ordering::Relaxed) { break; } }
                                     let dl_result = AsyncDownloader::new(client.clone(), url.clone()).await;
                                     if let Err(e) = dl_result { last_error = e.to_string(); continue; }
-                                    let mut dl = dl_result.unwrap();
+                                    let mut dl = dl_result.unwrap().with_cancel_token(cancel_token.clone());
                                     let net_t = net_tracker.clone();
                                     let disk_t = disk_tracker.clone();
                                     let dlf = dl.download(staging_dir.clone(), move |_, _, ns, ds| { net_t.add_bytes(ns); disk_t.add_bytes(ds); }).await;
@@ -796,11 +839,25 @@ impl Kuro for Game {
                         }); // end task
                         retry_tasks.push(ct);
                     }
+                    // If cancelled, abort all spawned tasks instead of waiting
+                    if let Some(token) = &cancel_token {
+                        if token.load(Ordering::Relaxed) {
+                            for t in retry_tasks { t.abort(); }
+                            return;
+                        }
+                    }
                     for t in retry_tasks { let _ = t.await; }
                 });
                 handles.push(handle);
             }
             for handle in handles { let _ = handle.await; }
+
+            if let Some(token) = &cancel_token {
+                if token.load(Ordering::Relaxed) {
+                    monitor_handle.abort();
+                    return false;
+                }
+            }
             monitor_handle.abort();
 
             // Report failed chunks

@@ -254,7 +254,7 @@ impl Sophon for Game {
         } else { false }
     }
 
-    async fn patch<F>(manifest: String, version: String, chunk_base: String, game_path: String, hpatchz_path: String, preloaded: bool, progress: F, ) -> bool where F: Fn(u64, u64, u64, u64, u64, u64, u8) + Send + Sync + 'static {
+    async fn patch<F>(manifest: String, version: String, chunk_base: String, game_path: String, hpatchz_path: String, preloaded: bool, progress: F, cancel_token: Option<Arc<AtomicBool>>) -> bool where F: Fn(u64, u64, u64, u64, u64, u64, u8) + Send + Sync + 'static {
         if manifest.is_empty() || game_path.is_empty() || chunk_base.is_empty() { return false; }
 
         let mainp = Path::new(game_path.as_str()).to_path_buf();
@@ -266,7 +266,7 @@ impl Sophon for Game {
         if dlr.exists() { fs::remove_dir_all(&dlr).unwrap(); }
 
         let client = Arc::new(AsyncDownloader::setup_client().await);
-        let mut dl = AsyncDownloader::new(client.clone(), manifest).await.unwrap();
+        let mut dl = AsyncDownloader::new(client.clone(), manifest).await.unwrap().with_cancel_token(cancel_token.clone());
         let file = dl.get_filename().await.to_string();
         let dll = dl.download(p.clone().join(&file), |_, _, _, _| {}).await;
 
@@ -322,6 +322,7 @@ impl Sophon for Game {
                 });
 
                 for file in decoded.files {
+                    if let Some(token) = &cancel_token { if token.load(Ordering::Relaxed) { break; } }
                     let ff = Arc::new(file.clone());
                     let hpatchz_path = hpatchz_path.clone();
                     let output_path = staging.join(file.name.clone());
@@ -407,7 +408,7 @@ impl Sophon for Game {
                                     }
                                 } else { continue; }
                             } else {
-                                let mut dl = AsyncDownloader::new(client.clone(), format!("{chunk_base}/{pn}").to_string(), ).await.unwrap();
+                                let mut dl = AsyncDownloader::new(client.clone(), format!("{chunk_base}/{pn}").to_string(), ).await.unwrap().with_cancel_token(cancel_token.clone());
 
                                 let net_t = net_tracker.clone();
                                 let disk_t = disk_tracker.clone();
@@ -482,6 +483,12 @@ impl Sophon for Game {
                         if r2 { progress_counter.fetch_add(file.size, Ordering::SeqCst); } else { continue; }
                     }
                 }
+                if let Some(token) = &cancel_token {
+                    if token.load(Ordering::Relaxed) {
+                        monitor_handle.abort();
+                        return false;
+                    }
+                }
                 monitor_handle.abort();
                 // All files are complete make sure we report done just in case
                 progress(download_total, download_total, install_total, install_total, 0, 0, 0);
@@ -504,7 +511,7 @@ impl Sophon for Game {
         } else { false }
     }
 
-    async fn repair_game<F>(manifest: String, chunk_base: String, game_path: String, is_fast: bool, progress: F) -> bool where F: Fn(u64, u64, u64, u64, u64, u64, u8) + Send + Sync + 'static {
+    async fn repair_game<F>(manifest: String, chunk_base: String, game_path: String, is_fast: bool, progress: F, cancel_token: Option<Arc<AtomicBool>>) -> bool where F: Fn(u64, u64, u64, u64, u64, u64, u8) + Send + Sync + 'static {
         if manifest.is_empty() || game_path.is_empty() || chunk_base.is_empty() { return false; }
 
         let mainp = Path::new(game_path.as_str());
@@ -517,7 +524,7 @@ impl Sophon for Game {
         if dlptch.exists() { fs::remove_dir_all(&dlptch).unwrap(); }
 
         let client = Arc::new(AsyncDownloader::setup_client().await);
-        let mut dl = AsyncDownloader::new(client.clone(), manifest).await.unwrap();
+        let mut dl = AsyncDownloader::new(client.clone(), manifest).await.unwrap().with_cancel_token(cancel_token.clone());
         let file = dl.get_filename().await.to_string();
         let dll = dl.download(p.clone().join(&file), |_, _, _, _| {}).await;
 
@@ -609,10 +616,12 @@ impl Sophon for Game {
                     let mainp = mainpbuf.clone();
                     let chunk_base = chunk_base.clone();
                     let client = client.clone();
+                    let cancel_token = cancel_token.clone();
 
                     let mut retry_tasks = Vec::new();
                     let handle = tokio::task::spawn(async move {
                         loop {
+                            if let Some(token) = &cancel_token { if token.load(Ordering::Relaxed) { break; } }
                             let job = local_worker.pop().or_else(|| injector.steal().success()).or_else(|| {
                                     for s in stealers.iter() {
                                         if let Steal::Success(t) = s.steal() { return Some(t); }
@@ -633,8 +642,10 @@ impl Sophon for Game {
                                 let chunks_dir = chunks_dir.clone();
                                 let chunk_base = chunk_base.clone();
                                 let client = client.clone();
+                                let cancel_token = cancel_token.clone();
                                 async move {
-                                    let downloaded_this_run = process_file_chunks(chunk_task.clone(), chunks_dir.clone(), mainp.clone(), chunk_base.clone(), client.clone(), is_fast, None, net_tracker.clone(), disk_tracker.clone(), None, None, None).await;
+                                    if let Some(token) = &cancel_token { if token.load(Ordering::Relaxed) { drop(permit); return; } }
+                                    let downloaded_this_run = process_file_chunks(chunk_task.clone(), chunks_dir.clone(), mainp.clone(), chunk_base.clone(), client.clone(), is_fast, cancel_token.clone(), net_tracker.clone(), disk_tracker.clone(), None, None, None).await;
 
                                     let fp = mainp.join(chunk_task.clone().name);
                                     validate_file(chunk_task.clone(), chunk_base.clone(), chunks_dir.clone(), mainp.clone(), fp.clone(), client.clone(), progress_counter.clone(), download_counter.clone(), file_compressed_sizes.clone(), progress_cb.clone(), install_total, is_fast, net_tracker.clone(), disk_tracker.clone(), None, downloaded_this_run).await;
@@ -643,11 +654,25 @@ impl Sophon for Game {
                             }); // end task
                             retry_tasks.push(ct);
                         }
+                        // If cancelled, abort all spawned tasks instead of waiting
+                        if let Some(token) = &cancel_token {
+                            if token.load(Ordering::Relaxed) {
+                                for t in retry_tasks { t.abort(); }
+                                return;
+                            }
+                        }
                         for t in retry_tasks { let _ = t.await; }
                     });
                     handles.push(handle);
                 }
                 for handle in handles { let _ = handle.await; }
+
+                if let Some(token) = &cancel_token {
+                    if token.load(Ordering::Relaxed) {
+                        monitor_handle.abort();
+                        return false;
+                    }
+                }
                 monitor_handle.abort();
                 // All files are complete make sure we report done just in case
                 progress(download_total, download_total, install_total, install_total, 0, 0, 0);
@@ -657,7 +682,7 @@ impl Sophon for Game {
         } else { false }
     }
 
-    async fn preload<F>(manifest: String, version: String, chunk_base: String, game_path: String, progress: F) -> bool where F: Fn(u64, u64, u64, u64, u64, u64, u8) + Send + Sync + 'static {
+    async fn preload<F>(manifest: String, version: String, chunk_base: String, game_path: String, progress: F, cancel_token: Option<Arc<AtomicBool>>) -> bool where F: Fn(u64, u64, u64, u64, u64, u64, u8) + Send + Sync + 'static {
         if manifest.is_empty() || game_path.is_empty() || chunk_base.is_empty() { return false; }
 
         let mainp = Path::new(game_path.as_str()).to_path_buf();
@@ -670,7 +695,7 @@ impl Sophon for Game {
         if dlp.exists() { fs::remove_dir_all(&dlp).unwrap(); }
 
         let client = Arc::new(AsyncDownloader::setup_client().await);
-        let mut dl = AsyncDownloader::new(client.clone(), manifest).await.unwrap();
+        let mut dl = AsyncDownloader::new(client.clone(), manifest).await.unwrap().with_cancel_token(cancel_token.clone());
         let file = dl.get_filename().await.to_string();
         let dll = dl.download(p.clone().join(&file), |_, _, _, _| {}).await;
 
@@ -755,10 +780,12 @@ impl Sophon for Game {
                     let chunk_base = chunk_base.clone();
                     let version = version.clone();
                     let client = client.clone();
+                    let cancel_token = cancel_token.clone();
 
                     let mut retry_tasks = Vec::new();
                     let handle = tokio::task::spawn(async move {
                         loop {
+                            if let Some(token) = &cancel_token { if token.load(Ordering::Relaxed) { break; } }
                             let job = local_worker.pop().or_else(|| injector.steal().success()).or_else(|| {
                                     for s in stealers.iter() {
                                         if let Steal::Success(t) = s.steal() { return Some(t); }
@@ -776,7 +803,9 @@ impl Sophon for Game {
                                 let chunk_base = chunk_base.clone();
                                 let version = version.clone();
                                 let client = client.clone();
+                                let cancel_token = cancel_token.clone();
                                 async move {
+                                    if let Some(token) = &cancel_token { if token.load(Ordering::Relaxed) { drop(permit); return; } }
                                     let filtered: Vec<(String, PatchChunk)> = chunk_task.chunks.clone().into_iter().filter(|(v, _chunk)| version.as_str() == v.as_str()).collect();
 
                                     // File has patches to apply
@@ -792,7 +821,7 @@ impl Sophon for Game {
                                                 return;
                                             }
 
-                                            let mut dl = AsyncDownloader::new(client.clone(), format!("{chunk_base}/{pn}").to_string(), ).await.unwrap();
+                                            let mut dl = AsyncDownloader::new(client.clone(), format!("{chunk_base}/{pn}").to_string(), ).await.unwrap().with_cancel_token(cancel_token.clone());
 
                                             // Simple byte tracking for preload download
                                             let net_t = net_tracker.clone();
@@ -818,11 +847,25 @@ impl Sophon for Game {
                             }); // end task
                             retry_tasks.push(ct);
                         }
+                        // If cancelled, abort all spawned tasks instead of waiting
+                        if let Some(token) = &cancel_token {
+                            if token.load(Ordering::Relaxed) {
+                                for t in retry_tasks { t.abort(); }
+                                return;
+                            }
+                        }
                         for t in retry_tasks { let _ = t.await; }
                     });
                     handles.push(handle);
                 }
                 for handle in handles { let _ = handle.await; }
+
+                if let Some(token) = &cancel_token {
+                    if token.load(Ordering::Relaxed) {
+                        monitor_handle.abort();
+                        return false;
+                    }
+                }
                 monitor_handle.abort();
                 // All files are complete make sure we report done just in case
                 progress(download_total, download_total, install_total, install_total, 0, 0, 0);
