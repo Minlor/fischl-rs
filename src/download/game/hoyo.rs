@@ -14,7 +14,7 @@ use std::time::Duration;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
 impl Sophon for Game {
-    async fn download<F>(manifest: String, chunk_base: String, game_path: String, progress: F, cancel_token: Option<Arc<AtomicBool>>, verified_files: Option<Arc<std::sync::Mutex<std::collections::HashSet<String>>>>, ) -> bool where F: Fn(u64, u64, u64, u64, u64, u64, u8) + Send + Sync + 'static {
+    async fn download<F>(manifest: String, chunk_base: String, game_path: String, progress: F, cancel_token: Option<Arc<AtomicBool>>, verified_files: Option<Arc<std::sync::Mutex<std::collections::HashSet<String>>>>) -> bool where F: Fn(u64, u64, u64, u64, u64, u64, u8) + Send + Sync + 'static {
         if manifest.is_empty() || game_path.is_empty() || chunk_base.is_empty() { return false; }
 
         let p = Path::new(game_path.as_str()).to_path_buf();
@@ -92,9 +92,7 @@ impl Sophon for Game {
                             tokio::time::sleep(Duration::from_millis(500)).await;
                             let validated_download = download_counter.load(Ordering::SeqCst);
                             let active_download = net_tracker.get_total();
-                            let download_current = validated_download
-                                .saturating_add(active_download)
-                                .min(download_total);
+                            let download_current = validated_download.saturating_add(active_download).min(download_total);
                             let install_current = progress_counter.load(Ordering::SeqCst);
                             let net_speed = net_tracker.update();
                             let disk_speed = disk_tracker.update();
@@ -511,7 +509,7 @@ impl Sophon for Game {
         } else { false }
     }
 
-    async fn repair_game<F>(manifest: String, chunk_base: String, game_path: String, is_fast: bool, progress: F, cancel_token: Option<Arc<AtomicBool>>) -> bool where F: Fn(u64, u64, u64, u64, u64, u64, u8) + Send + Sync + 'static {
+    async fn repair_game<F>(manifest: String, chunk_base: String, game_path: String, is_fast: bool, progress: F, cancel_token: Option<Arc<AtomicBool>>, verified_files: Option<Arc<std::sync::Mutex<std::collections::HashSet<String>>>>) -> bool where F: Fn(u64, u64, u64, u64, u64, u64, u8) + Send + Sync + 'static {
         if manifest.is_empty() || game_path.is_empty() || chunk_base.is_empty() { return false; }
 
         let mainp = Path::new(game_path.as_str());
@@ -558,6 +556,12 @@ impl Sophon for Game {
                 // Track compressed bytes satisfied without downloading in this run.
                 // Bytes that are actually downloaded come from net_tracker.
                 let download_counter = Arc::new(AtomicU64::new(0));
+                // Phase tracking using counters to avoid flickering
+                let active_verifications = Arc::new(AtomicU64::new(0));
+                let active_downloads = Arc::new(AtomicU64::new(0));
+                let active_validations = Arc::new(AtomicU64::new(0));
+                // Track failed chunks for reporting/retry
+                let failed_chunks: Arc<std::sync::Mutex<Vec<FailedChunk>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
                 let net_tracker = Arc::new(SpeedTracker::new());
                 let disk_tracker = Arc::new(SpeedTracker::new());
                 let progress = Arc::new(progress);
@@ -567,6 +571,9 @@ impl Sophon for Game {
                 let monitor_handle = tokio::spawn({
                     let progress_counter = progress_counter.clone();
                     let download_counter = download_counter.clone();
+                    let active_verifications = active_verifications.clone();
+                    let active_downloads = active_downloads.clone();
+                    let active_validations = active_validations.clone();
                     let net_tracker = net_tracker.clone();
                     let disk_tracker = disk_tracker.clone();
                     let progress = progress.clone();
@@ -579,7 +586,21 @@ impl Sophon for Game {
                             let install_current = progress_counter.load(Ordering::SeqCst);
                             let net_speed = net_tracker.update();
                             let disk_speed = disk_tracker.update();
-                            progress(download_current, download_total, install_current, install_total, net_speed, disk_speed, 2);
+                            // Determine phase based on counters - downloading takes priority
+                            // Phase: 0=idle, 1=verifying, 2=downloading, 3=installing, 4=validating, 5=moving
+                            let verifying = active_verifications.load(Ordering::SeqCst);
+                            let downloading = active_downloads.load(Ordering::SeqCst);
+                            let validating = active_validations.load(Ordering::SeqCst);
+                            let phase = if downloading > 0 {
+                                2 // downloading (actual network downloads happening)
+                            } else if validating > 0 {
+                                4 // validating (final checksum validation)
+                            } else if verifying > 0 {
+                                1 // verifying (checking existing files)
+                            } else {
+                                0 // idle
+                            };
+                            progress(download_current, download_total, install_current, install_total, net_speed, disk_speed, phase);
                         }
                     }
                 });
@@ -608,6 +629,9 @@ impl Sophon for Game {
                     let stealers = stealers.clone();
                     let progress_counter = progress_counter.clone();
                     let download_counter = download_counter.clone();
+                    let active_verifications = active_verifications.clone();
+                    let active_downloads = active_downloads.clone();
+                    let active_validations = active_validations.clone();
                     let file_compressed_sizes = file_compressed_sizes.clone();
                     let net_tracker = net_tracker.clone();
                     let disk_tracker = disk_tracker.clone();
@@ -617,6 +641,8 @@ impl Sophon for Game {
                     let chunk_base = chunk_base.clone();
                     let client = client.clone();
                     let cancel_token = cancel_token.clone();
+                    let verified_files = verified_files.clone();
+                    let failed_chunks = failed_chunks.clone();
 
                     let mut retry_tasks = Vec::new();
                     let handle = tokio::task::spawn(async move {
@@ -634,6 +660,9 @@ impl Sophon for Game {
                             let ct = tokio::task::spawn({
                                 let progress_counter = progress_counter.clone();
                                 let download_counter = download_counter.clone();
+                                let active_verifications = active_verifications.clone();
+                                let active_downloads = active_downloads.clone();
+                                let active_validations = active_validations.clone();
                                 let file_compressed_sizes = file_compressed_sizes.clone();
                                 let net_tracker = net_tracker.clone();
                                 let disk_tracker = disk_tracker.clone();
@@ -643,12 +672,20 @@ impl Sophon for Game {
                                 let chunk_base = chunk_base.clone();
                                 let client = client.clone();
                                 let cancel_token = cancel_token.clone();
+                                let verified_files = verified_files.clone();
+                                let failed_chunks = failed_chunks.clone();
                                 async move {
                                     if let Some(token) = &cancel_token { if token.load(Ordering::Relaxed) { drop(permit); return; } }
-                                    let downloaded_this_run = process_file_chunks(chunk_task.clone(), chunks_dir.clone(), mainp.clone(), chunk_base.clone(), client.clone(), is_fast, cancel_token.clone(), net_tracker.clone(), disk_tracker.clone(), None, None, None).await;
+                                    // Track verification phase (checking if file exists/valid)
+                                    active_verifications.fetch_add(1, Ordering::SeqCst);
+                                    let downloaded_this_run = process_file_chunks(chunk_task.clone(), chunks_dir.clone(), mainp.clone(), chunk_base.clone(), client.clone(), is_fast, cancel_token.clone(), net_tracker.clone(), disk_tracker.clone(), verified_files.clone(), Some(active_downloads.clone()), Some(failed_chunks.clone())).await;
+                                    active_verifications.fetch_sub(1, Ordering::SeqCst);
 
+                                    // Track validating phase (final checksum validation)
+                                    active_validations.fetch_add(1, Ordering::SeqCst);
                                     let fp = mainp.join(chunk_task.clone().name);
-                                    validate_file(chunk_task.clone(), chunk_base.clone(), chunks_dir.clone(), mainp.clone(), fp.clone(), client.clone(), progress_counter.clone(), download_counter.clone(), file_compressed_sizes.clone(), progress_cb.clone(), install_total, is_fast, net_tracker.clone(), disk_tracker.clone(), None, downloaded_this_run).await;
+                                    validate_file(chunk_task.clone(), chunk_base.clone(), chunks_dir.clone(), mainp.clone(), fp.clone(), client.clone(), progress_counter.clone(), download_counter.clone(), file_compressed_sizes.clone(), progress_cb.clone(), install_total, is_fast, net_tracker.clone(), disk_tracker.clone(), verified_files.clone(), downloaded_this_run).await;
+                                    active_validations.fetch_sub(1, Ordering::SeqCst);
                                     drop(permit);
                                 }
                             }); // end task
@@ -673,6 +710,16 @@ impl Sophon for Game {
                         return false;
                     }
                 }
+
+                // Check for failed chunks and report them
+                let failures = failed_chunks.lock().unwrap();
+                if !failures.is_empty() {
+                    eprintln!("\n=== Repair completed with {} failed chunk(s) ===", failures.len());
+                    for fc in failures.iter() { eprintln!("  - File: {}, Chunk: {}, Error: {}", fc.file_name, fc.chunk_name, fc.error); }
+                    eprintln!("Please re-run 'Game Repair' to fix remaining affected files.\n");
+                }
+                drop(failures);
+
                 monitor_handle.abort();
                 // All files are complete make sure we report done just in case
                 progress(download_total, download_total, install_total, install_total, 0, 0, 0);
