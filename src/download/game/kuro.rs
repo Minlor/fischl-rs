@@ -1,6 +1,6 @@
 use crate::download::game::{Game, Kuro};
 use crate::utils::downloader::AsyncDownloader;
-use crate::utils::{FailedChunk,KuroIndex,KuroResource,SpeedTracker,count_dir_bytes,extract_archive_with_progress,move_all_with_progress,validate_checksum};
+use crate::utils::{FailedChunk,KuroIndex,KuroResource,SpeedTracker,count_dir_bytes,extract_archive_with_progress,move_all,move_all_with_progress,validate_checksum};
 use crossbeam_deque::{Injector,Steal,Worker};
 use hdiffpatch_rs::patchers::KrDiff;
 use tokio::io::AsyncReadExt;
@@ -43,31 +43,36 @@ impl Kuro for Game {
             if !staging.exists() { tokio::fs::create_dir_all(staging.clone()).await.unwrap(); }
 
             let total_bytes: u64 = files.resource.iter().map(|f| f.size).sum();
-            let progress_counter = Arc::new(AtomicU64::new(0));
+            let download_counter = Arc::new(AtomicU64::new(0));
+            let install_counter = Arc::new(AtomicU64::new(0));
+            let active_verifications = Arc::new(AtomicU64::new(0));
+            let active_downloads = Arc::new(AtomicU64::new(0));
             let net_tracker = Arc::new(SpeedTracker::new());
             let disk_tracker = Arc::new(SpeedTracker::new());
             let progress = Arc::new(progress);
             let failed_chunks: Arc<std::sync::Mutex<Vec<FailedChunk>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
 
-            // Monitor task using EMA smoothing
-            // progress_counter tracks pre-validated files, net_tracker.get_total() tracks downloaded bytes
-            // Phase 2 = downloading - show install bar at 0% so user knows there's a move phase coming
             let monitor_handle = tokio::spawn({
-                let progress_counter = progress_counter.clone();
+                let download_counter = download_counter.clone();
+                let install_counter = install_counter.clone();
+                let active_verifications = active_verifications.clone();
+                let active_downloads = active_downloads.clone();
                 let net_tracker = net_tracker.clone();
                 let disk_tracker = disk_tracker.clone();
                 let progress = progress.clone();
                 async move {
                     loop {
                         tokio::time::sleep(Duration::from_millis(500)).await;
-                        let validated = progress_counter.load(Ordering::SeqCst);
-                        let downloaded = net_tracker.get_total();
-                        let current = validated + downloaded;
+                        let on_disk = download_counter.load(Ordering::SeqCst);
+                        let active_dl = net_tracker.get_total();
+                        let download_current = on_disk.saturating_add(active_dl).min(total_bytes);
+                        let install_current = install_counter.load(Ordering::SeqCst);
                         let net_speed = net_tracker.update();
                         let disk_speed = disk_tracker.update();
-                        // (download_current, download_total, install_current, install_total, net_speed, disk_speed, phase)
-                        // install_total = total_bytes shows install bar during download (at 0%), fills during move phase
-                        progress(current, total_bytes, 0, total_bytes, net_speed, disk_speed, 2);
+                        let verifying = active_verifications.load(Ordering::SeqCst);
+                        let downloading = active_downloads.load(Ordering::SeqCst);
+                        let phase = if downloading > 0 { 2 } else if verifying > 0 { 4 } else { 0 };
+                        progress(download_current, total_bytes, install_current, total_bytes, net_speed, disk_speed, phase);
                     }
                 }
             });
@@ -90,7 +95,10 @@ impl Kuro for Game {
                 let file_sem = file_sem.clone();
 
                 let stealers = stealers.clone();
-                let progress_counter = progress_counter.clone();
+                let download_counter = download_counter.clone();
+                let install_counter = install_counter.clone();
+                let active_verifications = active_verifications.clone();
+                let active_downloads = active_downloads.clone();
                 let net_tracker = net_tracker.clone();
                 let disk_tracker = disk_tracker.clone();
                 let chunk_base = base_url.clone();
@@ -112,7 +120,10 @@ impl Kuro for Game {
                         let permit = file_sem.clone().acquire_owned().await.unwrap();
 
                         let ct = tokio::spawn({
-                            let progress_counter = progress_counter.clone();
+                            let download_counter = download_counter.clone();
+                            let install_counter = install_counter.clone();
+                            let active_verifications = active_verifications.clone();
+                            let active_downloads = active_downloads.clone();
                             let net_tracker = net_tracker.clone();
                             let disk_tracker = disk_tracker.clone();
                             let chunk_base = chunk_base.clone();
@@ -131,7 +142,11 @@ impl Kuro for Game {
                                     if v.contains(&chunk_task.dest) { already_verified = true; }
                                 }
 
+                                // Verification phase - checking if file exists and is valid
+                                active_verifications.fetch_add(1, Ordering::SeqCst);
                                 let cvalid = if already_verified { true } else { validate_checksum(staging_dir.as_path(), chunk_task.md5.to_ascii_lowercase()).await };
+                                active_verifications.fetch_sub(1, Ordering::SeqCst);
+
                                 if staging_dir.exists() && cvalid {
                                     if !already_verified {
                                         if let Some(vf) = &verified_files {
@@ -139,34 +154,50 @@ impl Kuro for Game {
                                             v.insert(chunk_task.dest.clone());
                                         }
                                     }
-                                    progress_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
+                                    download_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
+                                    install_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
                                     return;
                                 }
+
+                                // File needs downloading - count existing partial bytes toward download progress
+                                let existing_size = if staging_dir.exists() { staging_dir.metadata().map(|m| m.len()).unwrap_or(0) } else { 0 };
+                                if existing_size > 0 { download_counter.fetch_add(existing_size, Ordering::SeqCst); }
 
                                 let pn = chunk_task.dest.clone();
                                 let url = format!("{chunk_base}/{pn}");
                                 let mut last_error = String::new();
                                 let mut success = false;
+                                let mut cancelled = false;
 
+                                active_downloads.fetch_add(1, Ordering::SeqCst);
                                 // Try up to 3 times
                                 for attempt in 0..3 {
-                                    if let Some(token) = &cancel_token { if token.load(Ordering::Relaxed) { break; } }
+                                    if let Some(token) = &cancel_token { if token.load(Ordering::Relaxed) { cancelled = true; break; } }
                                     let dl_result = AsyncDownloader::new(client.clone(), url.clone()).await;
                                     if let Err(e) = dl_result { last_error = e.to_string(); continue; }
                                     let mut dl = dl_result.unwrap().with_cancel_token(cancel_token.clone());
                                     let net_t = net_tracker.clone();
                                     let disk_t = disk_tracker.clone();
-                                    let dlf = dl.download(staging_dir.clone(), move |_, _, ns, ds| { net_t.add_bytes(ns); disk_t.add_bytes(ds); }).await;
-                                    if let Err(e) = &dlf { last_error = e.to_string(); continue; }
+                                    // Start from current file size so net_tracker only tracks NEW bytes (no overlap with download_counter)
+                                    let cur_size = staging_dir.metadata().map(|m| m.len()).unwrap_or(0);
+                                    let mut last_written = cur_size;
+                                    let dlf = dl.download(staging_dir.clone(), move |current, _total, _ns, _ds| { let diff = current.saturating_sub(last_written); if diff > 0 { net_t.add_bytes(diff); disk_t.add_bytes(diff); } last_written = current; }).await;
+                                    if let Err(e) = &dlf {
+                                        last_error = e.to_string();
+                                        if let Some(token) = &cancel_token { if token.load(Ordering::Relaxed) { cancelled = true; break; } }
+                                        continue;
+                                    }
                                     let cvalid = validate_checksum(staging_dir.as_path(), chunk_task.md5.to_ascii_lowercase()).await;
                                     if cvalid {
                                         if !already_verified { if let Some(vf) = &verified_files { vf.lock().unwrap().insert(chunk_task.dest.clone()); } }
+                                        install_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
                                         success = true;
                                         break;
                                     } else { last_error = format!("Checksum mismatch on attempt {}", attempt + 1); }
                                 }
+                                active_downloads.fetch_sub(1, Ordering::SeqCst);
 
-                                if !success {
+                                if !success && !cancelled {
                                     eprintln!("Failed to download file {} after 3 retries: {}", pn, last_error);
                                     failed_chunks.lock().unwrap().push(FailedChunk { file_name: pn.clone(), chunk_name: pn.clone(), error: last_error });
                                 }
@@ -206,14 +237,9 @@ impl Kuro for Game {
             drop(failures);
 
             // Download complete, now move files (phase 5 = moving)
-            progress(total_bytes, total_bytes, 0, total_bytes, 0, 0, 2);
-            let install_total = count_dir_bytes(&staging).await.unwrap_or(total_bytes);
-            let moved = move_all_with_progress(staging.as_ref(), game_path.as_ref(), install_total, &|current, total| {
-                progress(total_bytes, total_bytes, current, total, 0, 0, 5);
-            }).await;
+            progress(total_bytes, total_bytes, total_bytes, total_bytes, 0, 0, 5);
+            let moved = move_all(staging.as_ref(), game_path.as_ref()).await;
             if moved.is_ok() { let _ = tokio::fs::remove_dir_all(dlp.as_path()).await; }
-            // Final progress report
-            progress(total_bytes, total_bytes, install_total, install_total, 0, 0, 0);
             true
         } else { false }
     }
