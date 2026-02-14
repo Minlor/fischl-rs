@@ -142,6 +142,11 @@ impl Kuro for Game {
                                     if v.contains(&chunk_task.dest) { already_verified = true; }
                                 }
 
+                                // Count existing bytes toward download progress BEFORE validation
+                                // Prevents snap-back on resume while large files are still being checksummed
+                                let existing_size = if staging_dir.exists() { staging_dir.metadata().map(|m| m.len().min(chunk_task.size)).unwrap_or(0) } else { 0 };
+                                if existing_size > 0 { download_counter.fetch_add(existing_size, Ordering::SeqCst); }
+
                                 // Verification phase - checking if file exists and is valid
                                 active_verifications.fetch_add(1, Ordering::SeqCst);
                                 let cvalid = if already_verified { true } else { validate_checksum(staging_dir.as_path(), chunk_task.md5.to_ascii_lowercase()).await };
@@ -154,14 +159,12 @@ impl Kuro for Game {
                                             v.insert(chunk_task.dest.clone());
                                         }
                                     }
-                                    download_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
+                                    // download_counter already has existing_size, add any remainder
+                                    let remaining = chunk_task.size.saturating_sub(existing_size);
+                                    if remaining > 0 { download_counter.fetch_add(remaining, Ordering::SeqCst); }
                                     install_counter.fetch_add(chunk_task.size, Ordering::SeqCst);
                                     return;
                                 }
-
-                                // File needs downloading - count existing partial bytes toward download progress
-                                let existing_size = if staging_dir.exists() { staging_dir.metadata().map(|m| m.len()).unwrap_or(0) } else { 0 };
-                                if existing_size > 0 { download_counter.fetch_add(existing_size, Ordering::SeqCst); }
 
                                 let pn = chunk_task.dest.clone();
                                 let url = format!("{chunk_base}/{pn}");
