@@ -24,7 +24,7 @@ sysinfo = "0.38"
 serde_json = "1.0.149"
 thiserror = "1.0"
 futures-util = "0.3"
-zip = {version = "7.4.0", default-features = false, features = ["deflate"], optional = true}
+zip = {version = "8.0.0", default-features = false, features = ["deflate"], optional = true}
 tar = {version = "0.4.44", optional = true}
 flate2 = {version = "1.1.9", default-features = false, features = ["zlib-rs"], optional = true}
 liblzma = {version = "0.4", features = ["static"], optional = true}
