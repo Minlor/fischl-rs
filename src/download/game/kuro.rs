@@ -178,7 +178,8 @@ impl Kuro for Game {
                                     if let Some(token) = &cancel_token { if token.load(Ordering::Relaxed) { cancelled = true; break; } }
                                     let dl_result = AsyncDownloader::new(client.clone(), url.clone()).await;
                                     if let Err(e) = dl_result { last_error = e.to_string(); continue; }
-                                    let mut dl = dl_result.unwrap().with_cancel_token(cancel_token.clone());
+                                    // Graceful pause: let an active file finish before pausing.
+                                    let mut dl = dl_result.unwrap();
                                     let net_t = net_tracker.clone();
                                     let disk_t = disk_tracker.clone();
                                     // Start from current file size so net_tracker only tracks NEW bytes (no overlap with download_counter)
@@ -209,13 +210,7 @@ impl Kuro for Game {
                         }); // end task
                         retry_tasks.push(ct);
                     }
-                    // If cancelled, abort all spawned tasks instead of waiting
-                    if let Some(token) = &cancel_token {
-                        if token.load(Ordering::Relaxed) {
-                            for t in retry_tasks { t.abort(); }
-                            return;
-                        }
-                    }
+                    // Graceful pause: wait for in-flight file tasks to finish.
                     for t in retry_tasks { let _ = t.await; }
                 });
                 handles.push(handle);
@@ -442,7 +437,8 @@ impl Kuro for Game {
                                         if let Some(token) = &cancel_token { if token.load(Ordering::Relaxed) { break; } }
                                         let dl_result = AsyncDownloader::new(client.clone(), url.clone()).await;
                                         if let Err(e) = dl_result { last_error = e.to_string(); continue; }
-                                        let mut dl = dl_result.unwrap().with_cancel_token(cancel_token.clone());
+                                        // Graceful pause: let an active file finish before pausing.
+                                        let mut dl = dl_result.unwrap();
                                         let net_t = net_tracker.clone();
                                         let disk_t = disk_tracker.clone();
                                         let dlf = dl.download(staging_dir.clone(), move |_, _, ns, ds| { net_t.add_bytes(ns); disk_t.add_bytes(ds); }).await;
@@ -460,13 +456,7 @@ impl Kuro for Game {
                             }); // end task
                             retry_tasks.push(ct);
                         }
-                        // If cancelled, abort all spawned tasks instead of waiting
-                        if let Some(token) = &cancel_token {
-                            if token.load(Ordering::Relaxed) {
-                                for t in retry_tasks { t.abort(); }
-                                return;
-                            }
-                        }
+                        // Graceful pause: wait for in-flight file tasks to finish.
                         for t in retry_tasks { let _ = t.await; }
                     });
                     handles.push(handle);
@@ -902,7 +892,8 @@ impl Kuro for Game {
                                     if let Some(token) = &cancel_token { if token.load(Ordering::Relaxed) { break; } }
                                     let dl_result = AsyncDownloader::new(client.clone(), url.clone()).await;
                                     if let Err(e) = dl_result { last_error = e.to_string(); continue; }
-                                    let mut dl = dl_result.unwrap().with_cancel_token(cancel_token.clone());
+                                    // Graceful pause: let an active file finish before pausing.
+                                    let mut dl = dl_result.unwrap();
                                     let net_t = net_tracker.clone();
                                     let disk_t = disk_tracker.clone();
                                     let dlf = dl.download(staging_dir.clone(), move |_, _, ns, ds| { net_t.add_bytes(ns); disk_t.add_bytes(ds); }).await;
@@ -920,13 +911,7 @@ impl Kuro for Game {
                         }); // end task
                         retry_tasks.push(ct);
                     }
-                    // If cancelled, abort all spawned tasks instead of waiting
-                    if let Some(token) = &cancel_token {
-                        if token.load(Ordering::Relaxed) {
-                            for t in retry_tasks { t.abort(); }
-                            return;
-                        }
-                    }
+                    // Graceful pause: wait for in-flight file tasks to finish.
                     for t in retry_tasks { let _ = t.await; }
                 });
                 handles.push(handle);
