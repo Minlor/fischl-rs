@@ -157,7 +157,7 @@ mod tests {
         //let chunkurl = "https://hw-pcdownload-aws.aki-game.net/launcher/game/G153/50004/2.5.1/IYOwHBLfeAXMxVgHwGybWvvSqiDnPlbs/zip";
 
         let path = "/games/kuro/wuwa_global/testing";
-        let rep = <Game as Kuro>::repair_game(manifest.to_string(), chunkurl.to_string(), path.parse().unwrap(), false, |_, _, _, _, _, _, _| {}, None).await;
+        let rep = <Game as Kuro>::repair_game(manifest.to_string(), chunkurl.to_string(), path.parse().unwrap(), false, |_, _, _, _, _, _, _| {}, None, None).await;
         if rep {
             println!("repair_game_kuro success!");
         } else {

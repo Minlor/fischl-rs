@@ -9,9 +9,6 @@ edition = "2024"
 prost-build = "0.14.3"
 protoc-bin-vendored = "3"
 
-[target.'cfg(target_os = "linux")'.dependencies]
-wincompatlib = {version = "0.7.7", features = ["all"], optional = true}
-
 [dependencies]
 serde = {version = "1", features = ["derive"]}
 reqwest = {version = "0.13.2", features = ["blocking", "json", "stream", "native-tls-vendored", "__tls"]}
@@ -36,7 +33,7 @@ crossbeam-deque = {version = "0.8.6", optional = true}
 hdiffpatch-rs = { git = "https://github.com/TwintailTeam/hdiffpatch-rs.git", branch = "master" }
 
 [features]
-compat = ["dep:wincompatlib"]
+compat = []
 download = ["dep:zip", "dep:tar", "dep:flate2", "dep:liblzma", "dep:zstd", "dep:sevenz-rust2", "dep:chksum-md5", "dep:prost", "dep:crossbeam-deque"]
 
 default = ["download"]
